@@ -15,6 +15,13 @@
       "when": 1773112943287,
       "tag": "0001_direct_csv_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1773121234488,
+      "tag": "0002_deep_manta",
+      "breakpoints": true
     }
   ]
 }

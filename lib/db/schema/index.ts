@@ -22,10 +22,18 @@ export const bidInvestigations = sqliteTable(
     buyerId: text("buyer_id"),
     bidAmount: real("bid_amount"),
     winningBid: real("winning_bid"),
+    bidElapsedMs: integer("bid_elapsed_ms"),
     isZeroBid: integer("is_zero_bid", { mode: "boolean" }).notNull().default(false),
     reasonForReject: text("reason_for_reject"),
     httpStatusCode: integer("http_status_code"),
     parsedErrorMessage: text("parsed_error_message"),
+    primaryFailureStage: text("primary_failure_stage").notNull().default("unknown"),
+    primaryTargetName: text("primary_target_name"),
+    primaryTargetId: text("primary_target_id"),
+    primaryBuyerName: text("primary_buyer_name"),
+    primaryBuyerId: text("primary_buyer_id"),
+    primaryErrorCode: integer("primary_error_code"),
+    primaryErrorMessage: text("primary_error_message"),
     requestBody: text("request_body", { mode: "json" }),
     responseBody: text("response_body", { mode: "json" }),
     rawTraceJson: text("raw_trace_json", { mode: "json" }).notNull().default(sql`'{}'`),
@@ -54,6 +62,60 @@ export const bidInvestigations = sqliteTable(
     importedAtIdx: index("bid_investigations_imported_at_idx").on(table.importedAt),
     bidDtIdx: index("bid_investigations_bid_dt_idx").on(table.bidDt),
     importRunIdIdx: index("bid_investigations_import_run_id_idx").on(table.importRunId),
+  }),
+);
+
+export const bidTargetAttempts = sqliteTable(
+  "bid_target_attempts",
+  {
+    id: text("id").primaryKey(),
+    bidInvestigationId: text("bid_investigation_id")
+      .notNull()
+      .references(() => bidInvestigations.id, {
+        onDelete: "cascade",
+      }),
+    sequence: integer("sequence").notNull(),
+    eventName: text("event_name").notNull(),
+    eventTimestamp: text("event_timestamp"),
+    targetName: text("target_name"),
+    targetId: text("target_id"),
+    targetBuyer: text("target_buyer"),
+    targetBuyerId: text("target_buyer_id"),
+    targetNumber: text("target_number"),
+    targetGroupName: text("target_group_name"),
+    targetGroupId: text("target_group_id"),
+    targetSubId: text("target_sub_id"),
+    targetBuyerSubId: text("target_buyer_sub_id"),
+    requestUrl: text("request_url"),
+    httpMethod: text("http_method"),
+    requestStatus: text("request_status"),
+    httpStatusCode: integer("http_status_code"),
+    durationMs: integer("duration_ms"),
+    routePriority: integer("route_priority"),
+    routeWeight: integer("route_weight"),
+    accepted: integer("accepted", { mode: "boolean" }),
+    winning: integer("winning", { mode: "boolean" }),
+    bidAmount: real("bid_amount"),
+    minDurationSeconds: integer("min_duration_seconds"),
+    rejectReason: text("reject_reason"),
+    errorCode: integer("error_code"),
+    errorMessage: text("error_message"),
+    errorsJson: text("errors_json", { mode: "json" }).notNull().default(sql`'[]'`),
+    requestBody: text("request_body", { mode: "json" }),
+    responseBody: text("response_body", { mode: "json" }),
+    summaryReason: text("summary_reason"),
+    rawEventJson: text("raw_event_json", { mode: "json" }).notNull().default(sql`'{}'`),
+    createdAt: text("created_at").notNull().default(nowIso),
+    updatedAt: text("updated_at").notNull().default(nowIso),
+  },
+  (table) => ({
+    bidInvestigationIdx: index("bid_target_attempts_bid_investigation_id_idx").on(
+      table.bidInvestigationId,
+    ),
+    bidInvestigationSequenceUnique: uniqueIndex(
+      "bid_target_attempts_investigation_sequence_unique",
+    ).on(table.bidInvestigationId, table.sequence),
+    targetIdx: index("bid_target_attempts_target_idx").on(table.targetName, table.targetBuyer),
   }),
 );
 
@@ -302,6 +364,7 @@ export const importOpsEvents = sqliteTable(
 );
 
 export type BidInvestigationRow = typeof bidInvestigations.$inferSelect;
+export type BidTargetAttemptRow = typeof bidTargetAttempts.$inferSelect;
 export type BidEventRow = typeof bidEvents.$inferSelect;
 export type ImportRunRow = typeof importRuns.$inferSelect;
 export type ImportRunItemRow = typeof importRunItems.$inferSelect;

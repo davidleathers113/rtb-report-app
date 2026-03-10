@@ -3,12 +3,15 @@ import "server-only";
 import { eq, inArray } from "drizzle-orm";
 
 import { getDb, getSqlite } from "@/lib/db/client";
+import { getImportSourceRowContextForBidId } from "@/lib/db/import-sources";
 import {
   bidEvents,
   bidInvestigations,
+  bidTargetAttempts,
   importRuns,
   type BidEventRow,
   type BidInvestigationRow,
+  type BidTargetAttemptRow,
 } from "@/lib/db/schema";
 import { addSeconds, createId, nowIso, toTimestamp } from "@/lib/db/utils";
 import type {
@@ -19,6 +22,7 @@ import type {
   FetchStatus,
   InvestigationDetail,
   InvestigationListItem,
+  InvestigationSourceContext,
   InvestigationsPageData,
   NormalizedBidData,
 } from "@/types/bid";
@@ -45,8 +49,14 @@ function toListItem(row: BidInvestigationRow): InvestigationListItem {
     targetName: row.targetName,
     bidAmount: row.bidAmount,
     winningBid: row.winningBid,
+    bidElapsedMs: row.bidElapsedMs,
     isZeroBid: row.isZeroBid,
     httpStatusCode: row.httpStatusCode,
+    primaryFailureStage: row.primaryFailureStage as InvestigationListItem["primaryFailureStage"],
+    primaryTargetName: row.primaryTargetName,
+    primaryBuyerName: row.primaryBuyerName,
+    primaryErrorCode: row.primaryErrorCode,
+    primaryErrorMessage: row.primaryErrorMessage,
     rootCause: row.rootCause as InvestigationListItem["rootCause"],
     ownerType: row.ownerType as InvestigationListItem["ownerType"],
     severity: row.severity as InvestigationListItem["severity"],
@@ -62,6 +72,8 @@ function toListItem(row: BidInvestigationRow): InvestigationListItem {
 function toDetail(
   row: BidInvestigationRow,
   eventRows: BidEventRow[],
+  targetAttemptRows: BidTargetAttemptRow[],
+  sourceContext: InvestigationSourceContext | null,
 ): InvestigationDetail {
   return {
     id: row.id,
@@ -78,10 +90,18 @@ function toDetail(
     buyerId: row.buyerId,
     bidAmount: row.bidAmount,
     winningBid: row.winningBid,
+    bidElapsedMs: row.bidElapsedMs,
     isZeroBid: row.isZeroBid,
     reasonForReject: row.reasonForReject,
     httpStatusCode: row.httpStatusCode,
     errorMessage: row.parsedErrorMessage,
+    primaryFailureStage: row.primaryFailureStage as InvestigationDetail["primaryFailureStage"],
+    primaryTargetName: row.primaryTargetName,
+    primaryTargetId: row.primaryTargetId,
+    primaryBuyerName: row.primaryBuyerName,
+    primaryBuyerId: row.primaryBuyerId,
+    primaryErrorCode: row.primaryErrorCode,
+    primaryErrorMessage: row.primaryErrorMessage,
     requestBody: (row.requestBody ?? null) as Record<string, unknown> | string | null,
     responseBody: (row.responseBody ?? null) as Record<string, unknown> | string | null,
     rawTraceJson: (row.rawTraceJson ?? {}) as Record<string, unknown>,
@@ -98,6 +118,40 @@ function toDetail(
       eventTimestamp: event.eventTimestamp,
       eventValsJson: (event.eventValsJson ?? null) as Record<string, unknown> | null,
       eventStrValsJson: (event.eventStrValsJson ?? null) as Record<string, string> | null,
+    })),
+    targetAttempts: targetAttemptRows.map((attempt) => ({
+      id: attempt.id,
+      sequence: attempt.sequence,
+      eventName: attempt.eventName,
+      eventTimestamp: attempt.eventTimestamp,
+      targetName: attempt.targetName,
+      targetId: attempt.targetId,
+      targetBuyer: attempt.targetBuyer,
+      targetBuyerId: attempt.targetBuyerId,
+      targetNumber: attempt.targetNumber,
+      targetGroupName: attempt.targetGroupName,
+      targetGroupId: attempt.targetGroupId,
+      targetSubId: attempt.targetSubId,
+      targetBuyerSubId: attempt.targetBuyerSubId,
+      requestUrl: attempt.requestUrl,
+      httpMethod: attempt.httpMethod,
+      requestStatus: attempt.requestStatus,
+      httpStatusCode: attempt.httpStatusCode,
+      durationMs: attempt.durationMs,
+      routePriority: attempt.routePriority,
+      routeWeight: attempt.routeWeight,
+      accepted: attempt.accepted,
+      winning: attempt.winning,
+      bidAmount: attempt.bidAmount,
+      minDurationSeconds: attempt.minDurationSeconds,
+      rejectReason: attempt.rejectReason,
+      errorCode: attempt.errorCode,
+      errorMessage: attempt.errorMessage,
+      errors: (attempt.errorsJson ?? []) as string[],
+      requestBody: (attempt.requestBody ?? null) as Record<string, unknown> | string | null,
+      responseBody: (attempt.responseBody ?? null) as Record<string, unknown> | string | null,
+      summaryReason: attempt.summaryReason,
+      rawEventJson: (attempt.rawEventJson ?? {}) as Record<string, unknown>,
     })),
     outcome: row.outcome as InvestigationDetail["outcome"],
     rootCause: row.rootCause as InvestigationDetail["rootCause"],
@@ -117,6 +171,7 @@ function toDetail(
     importedAt: row.importedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    sourceContext,
   };
 }
 
@@ -263,10 +318,18 @@ export async function upsertInvestigation(input: {
     buyerId: input.normalizedBid.buyerId,
     bidAmount: input.normalizedBid.bidAmount,
     winningBid: input.normalizedBid.winningBid,
+    bidElapsedMs: input.normalizedBid.bidElapsedMs,
     isZeroBid: input.normalizedBid.isZeroBid,
     reasonForReject: input.normalizedBid.reasonForReject,
     httpStatusCode: input.normalizedBid.httpStatusCode,
     parsedErrorMessage: input.normalizedBid.errorMessage,
+    primaryFailureStage: input.normalizedBid.primaryFailureStage,
+    primaryTargetName: input.normalizedBid.primaryTargetName,
+    primaryTargetId: input.normalizedBid.primaryTargetId,
+    primaryBuyerName: input.normalizedBid.primaryBuyerName,
+    primaryBuyerId: input.normalizedBid.primaryBuyerId,
+    primaryErrorCode: input.normalizedBid.primaryErrorCode,
+    primaryErrorMessage: input.normalizedBid.primaryErrorMessage,
     requestBody: input.normalizedBid.requestBody,
     responseBody: input.normalizedBid.responseBody,
     rawTraceJson: input.normalizedBid.rawTraceJson,
@@ -299,6 +362,9 @@ export async function upsertInvestigation(input: {
   db.delete(bidEvents)
     .where(eq(bidEvents.bidInvestigationId, investigationId))
     .run();
+  db.delete(bidTargetAttempts)
+    .where(eq(bidTargetAttempts.bidInvestigationId, investigationId))
+    .run();
 
   if (input.normalizedBid.relevantEvents.length > 0) {
     db.insert(bidEvents)
@@ -310,6 +376,50 @@ export async function upsertInvestigation(input: {
           eventTimestamp: event.eventTimestamp,
           eventValsJson: event.eventValsJson,
           eventStrValsJson: event.eventStrValsJson,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      )
+      .run();
+  }
+
+  if (input.normalizedBid.targetAttempts.length > 0) {
+    db.insert(bidTargetAttempts)
+      .values(
+        input.normalizedBid.targetAttempts.map((attempt) => ({
+          id: createId(),
+          bidInvestigationId: investigationId,
+          sequence: attempt.sequence,
+          eventName: attempt.eventName,
+          eventTimestamp: attempt.eventTimestamp,
+          targetName: attempt.targetName,
+          targetId: attempt.targetId,
+          targetBuyer: attempt.targetBuyer,
+          targetBuyerId: attempt.targetBuyerId,
+          targetNumber: attempt.targetNumber,
+          targetGroupName: attempt.targetGroupName,
+          targetGroupId: attempt.targetGroupId,
+          targetSubId: attempt.targetSubId,
+          targetBuyerSubId: attempt.targetBuyerSubId,
+          requestUrl: attempt.requestUrl,
+          httpMethod: attempt.httpMethod,
+          requestStatus: attempt.requestStatus,
+          httpStatusCode: attempt.httpStatusCode,
+          durationMs: attempt.durationMs,
+          routePriority: attempt.routePriority,
+          routeWeight: attempt.routeWeight,
+          accepted: attempt.accepted,
+          winning: attempt.winning,
+          bidAmount: attempt.bidAmount,
+          minDurationSeconds: attempt.minDurationSeconds,
+          rejectReason: attempt.rejectReason,
+          errorCode: attempt.errorCode,
+          errorMessage: attempt.errorMessage,
+          errorsJson: attempt.errors,
+          requestBody: attempt.requestBody,
+          responseBody: attempt.responseBody,
+          summaryReason: attempt.summaryReason,
+          rawEventJson: attempt.rawEventJson,
           createdAt: now,
           updatedAt: now,
         })),
@@ -454,6 +564,8 @@ export async function markInvestigationFetchFailed(input: {
     fetchStatus: "failed",
     parsedErrorMessage: input.errorMessage,
     lastError: input.errorMessage,
+    primaryFailureStage: "fetch_failed",
+    primaryErrorMessage: input.errorMessage,
     leaseExpiresAt: null,
     importedAt: now,
     updatedAt: now,
@@ -498,6 +610,8 @@ export async function markInvestigationFetchFailed(input: {
         httpStatusCode: input.httpStatusCode ?? null,
         responseBody: input.responseBody ?? null,
         rawTraceJson: input.rawTraceJson ?? {},
+        primaryFailureStage: "fetch_failed",
+        primaryErrorMessage: input.errorMessage,
         outcome: "unknown",
         rootCause: "unknown_needs_review",
         rootCauseConfidence: 0.2,
@@ -547,6 +661,9 @@ function matchesSearch(row: BidInvestigationRow, search: string | undefined) {
     row.campaignName,
     row.publisherName,
     row.targetName,
+    row.primaryTargetName,
+    row.primaryBuyerName,
+    row.primaryErrorMessage,
   ];
 
   return values.some((value) => value?.toLowerCase().includes(sanitized));
@@ -606,6 +723,11 @@ export async function getInvestigationByBidId(bidId: string) {
     .from(bidEvents)
     .where(eq(bidEvents.bidInvestigationId, investigation.id))
     .all() as BidEventRow[];
+  const targetAttemptData = db
+    .select()
+    .from(bidTargetAttempts)
+    .where(eq(bidTargetAttempts.bidInvestigationId, investigation.id))
+    .all() as BidTargetAttemptRow[];
 
   eventData.sort((left, right) => {
     const leftPrimary = left.eventTimestamp ?? left.createdAt;
@@ -615,8 +737,26 @@ export async function getInvestigationByBidId(bidId: string) {
     }
     return left.createdAt.localeCompare(right.createdAt);
   });
+  targetAttemptData.sort((left, right) => left.sequence - right.sequence);
+  const sourceRow =
+    investigation.importRunId
+      ? await getImportSourceRowContextForBidId({
+          importRunId: investigation.importRunId,
+          bidId: investigation.bidId,
+        })
+      : null;
+  const sourceContext: InvestigationSourceContext | null = sourceRow
+    ? {
+        fileName: sourceRow.fileName,
+        rowNumber: sourceRow.rowNumber,
+        bidDt: sourceRow.bidDt,
+        bidAmount: sourceRow.bidAmount,
+        reasonForReject: sourceRow.reasonForReject,
+        rowJson: (sourceRow.rowJson ?? {}) as Record<string, unknown>,
+      }
+    : null;
 
-  return toDetail(investigation, eventData);
+  return toDetail(investigation, eventData, targetAttemptData, sourceContext);
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {

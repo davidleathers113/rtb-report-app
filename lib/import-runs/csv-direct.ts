@@ -717,10 +717,25 @@ function buildNormalizedBid(row: CsvDirectParsedRow): NormalizedBidData {
     buyerId: null,
     bidAmount,
     winningBid,
+    bidElapsedMs: row.bidElapsedMs,
     isZeroBid,
     reasonForReject: row.reasonForReject,
     httpStatusCode: null,
     errorMessage: null,
+    primaryFailureStage:
+      outcome === "accepted"
+        ? "accepted"
+        : outcome === "zero_bid"
+          ? "zero_bid"
+          : outcome === "rejected"
+            ? "target_rejected"
+            : "unknown",
+    primaryTargetName: null,
+    primaryTargetId: null,
+    primaryBuyerName: null,
+    primaryBuyerId: null,
+    primaryErrorCode: null,
+    primaryErrorMessage: row.reasonForReject,
     requestBody: null,
     responseBody: null,
     rawTraceJson: {
@@ -734,6 +749,7 @@ function buildNormalizedBid(row: CsvDirectParsedRow): NormalizedBidData {
       bidElapsedMs: row.bidElapsedMs,
     },
     relevantEvents: [],
+    targetAttempts: [],
     outcome,
   };
 }

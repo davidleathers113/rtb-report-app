@@ -57,6 +57,9 @@ export function ImportRunItemsTable({
           <TableHead>Bid ID</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Resolution</TableHead>
+          <TableHead>Failure Stage</TableHead>
+          <TableHead>Target</TableHead>
+          <TableHead>Error</TableHead>
           <TableHead>Attempts</TableHead>
           <TableHead>Finished</TableHead>
           <TableHead>Result</TableHead>
@@ -80,6 +83,21 @@ export function ImportRunItemsTable({
               ) : (
                 "-"
               )}
+            </TableCell>
+            <TableCell>
+              {item.investigation ? (
+                <Badge variant="default">
+                  {toSentenceCase(item.investigation.primaryFailureStage)}
+                </Badge>
+              ) : (
+                "-"
+              )}
+            </TableCell>
+            <TableCell>
+              {item.investigation?.primaryTargetName ?? item.investigation?.targetName ?? "-"}
+            </TableCell>
+            <TableCell className="max-w-sm text-sm text-slate-600">
+              {item.investigation?.primaryErrorMessage ?? item.errorMessage ?? "-"}
             </TableCell>
             <TableCell>{item.attemptCount}</TableCell>
             <TableCell>{formatDateTime(item.completedAt)}</TableCell>

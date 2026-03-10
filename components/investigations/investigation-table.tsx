@@ -63,6 +63,22 @@ function fetchStatusVariant(fetchStatus: InvestigationListItem["fetchStatus"]) {
   return "warning";
 }
 
+function failureStageVariant(stage: InvestigationListItem["primaryFailureStage"]) {
+  if (stage === "accepted") {
+    return "success";
+  }
+
+  if (stage === "zero_bid") {
+    return "warning";
+  }
+
+  if (stage === "target_rejected" || stage === "fetch_failed") {
+    return "destructive";
+  }
+
+  return "default";
+}
+
 const columns: ColumnDef<InvestigationListItem>[] = [
   {
     id: "expand",
@@ -108,6 +124,20 @@ const columns: ColumnDef<InvestigationListItem>[] = [
     header: "Target",
   },
   {
+    accessorKey: "primaryFailureStage",
+    header: "Failure Stage",
+    cell: ({ row }) => (
+      <Badge variant={failureStageVariant(row.original.primaryFailureStage)}>
+        {toSentenceCase(row.original.primaryFailureStage)}
+      </Badge>
+    ),
+  },
+  {
+    accessorKey: "primaryTargetName",
+    header: "Failing Target",
+    cell: ({ row }) => row.original.primaryTargetName ?? row.original.targetName ?? "-",
+  },
+  {
     accessorKey: "bidAmount",
     header: "Bid Amount",
     cell: ({ row }) => formatCurrency(row.original.bidAmount),
@@ -123,6 +153,11 @@ const columns: ColumnDef<InvestigationListItem>[] = [
     cell: ({ row }) => (
       <Badge variant="default">{toSentenceCase(row.original.rootCause)}</Badge>
     ),
+  },
+  {
+    accessorKey: "primaryErrorCode",
+    header: "Error Code",
+    cell: ({ row }) => row.original.primaryErrorCode ?? "-",
   },
   {
     accessorKey: "ownerType",
@@ -143,11 +178,11 @@ const columns: ColumnDef<InvestigationListItem>[] = [
     ),
   },
   {
-    accessorKey: "explanation",
-    header: "Explanation",
+    accessorKey: "primaryErrorMessage",
+    header: "Error Message",
     cell: ({ row }) => (
       <div className="max-w-sm text-sm text-slate-600">
-        {row.original.lastError ?? row.original.explanation}
+        {row.original.primaryErrorMessage ?? row.original.lastError ?? row.original.explanation}
       </div>
     ),
   },
@@ -266,6 +301,12 @@ export function InvestigationTable({
                           <Badge variant={fetchStatusVariant(detail.fetchStatus)}>
                             {toSentenceCase(detail.fetchStatus)}
                           </Badge>
+                          <Badge variant={failureStageVariant(detail.primaryFailureStage)}>
+                            {toSentenceCase(detail.primaryFailureStage)}
+                          </Badge>
+                          {detail.primaryErrorCode !== null ? (
+                            <Badge variant="destructive">Code {detail.primaryErrorCode}</Badge>
+                          ) : null}
                           {detail.fetchedAt ? (
                             <span className="text-sm text-slate-500">
                               Fetched {formatDateTime(detail.fetchedAt)}
@@ -277,6 +318,15 @@ export function InvestigationTable({
                             </span>
                           ) : null}
                         </div>
+                        {detail.primaryTargetName || detail.primaryErrorMessage ? (
+                          <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-700">
+                            <span className="font-medium text-slate-900">Primary failure:</span>{" "}
+                            {detail.primaryTargetName ?? detail.targetName ?? "Unknown target"} -{" "}
+                            {detail.primaryErrorMessage ??
+                              detail.reasonForReject ??
+                              detail.explanation}
+                          </div>
+                        ) : null}
                         <div className="grid gap-4 lg:grid-cols-2">
                         <div className="space-y-2">
                           <p className="text-sm font-semibold text-slate-900">

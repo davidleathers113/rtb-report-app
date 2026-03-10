@@ -251,6 +251,42 @@ export async function getImportSourceRowForBidId(input: {
   return row ?? null;
 }
 
+export interface ImportSourceRowContext {
+  fileName: string;
+  rowNumber: number;
+  bidId: string | null;
+  bidDt: string | null;
+  bidAmount: number | null;
+  reasonForReject: string | null;
+  rowJson: Record<string, unknown>;
+}
+
+export async function getImportSourceRowContextForBidId(input: {
+  importRunId: string;
+  bidId: string;
+}): Promise<ImportSourceRowContext | null> {
+  const db = getDb();
+  const row = db
+    .select({
+      fileName: importSourceFiles.fileName,
+      rowNumber: importSourceRows.rowNumber,
+      bidId: importSourceRows.bidId,
+      bidDt: importSourceRows.bidDt,
+      bidAmount: importSourceRows.bidAmount,
+      reasonForReject: importSourceRows.reasonForReject,
+      rowJson: importSourceRows.rowJson,
+    })
+    .from(importSourceRows)
+    .leftJoin(importSourceFiles, eq(importSourceRows.importSourceFileId, importSourceFiles.id))
+    .where(
+      and(eq(importSourceRows.importRunId, input.importRunId), eq(importSourceRows.bidId, input.bidId)),
+    )
+    .orderBy(asc(importSourceRows.rowNumber))
+    .get() as ImportSourceRowContext | undefined;
+
+  return row ?? null;
+}
+
 export interface ImportSourceFileSummary {
   id: string;
   importRunId: string;

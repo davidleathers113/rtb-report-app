@@ -29,12 +29,21 @@ export const DIAGNOSIS_SEVERITIES = [
 
 export const OUTCOMES = ["accepted", "rejected", "zero_bid", "unknown"] as const;
 export const FETCH_STATUSES = ["pending", "fetched", "failed"] as const;
+export const FAILURE_STAGES = [
+  "accepted",
+  "target_rejected",
+  "zero_bid",
+  "routing",
+  "fetch_failed",
+  "unknown",
+] as const;
 
 export type RootCause = (typeof ROOT_CAUSES)[number];
 export type OwnerType = (typeof OWNER_TYPES)[number];
 export type DiagnosisSeverity = (typeof DIAGNOSIS_SEVERITIES)[number];
 export type InvestigationOutcome = (typeof OUTCOMES)[number];
 export type FetchStatus = (typeof FETCH_STATUSES)[number];
+export type FailureStage = (typeof FAILURE_STAGES)[number];
 
 export interface BidEvent {
   id?: string;
@@ -42,6 +51,50 @@ export interface BidEvent {
   eventTimestamp: string | null;
   eventValsJson: Record<string, unknown> | null;
   eventStrValsJson: Record<string, string> | null;
+}
+
+export interface BidTargetAttempt {
+  id?: string;
+  sequence: number;
+  eventName: string;
+  eventTimestamp: string | null;
+  targetName: string | null;
+  targetId: string | null;
+  targetBuyer: string | null;
+  targetBuyerId: string | null;
+  targetNumber: string | null;
+  targetGroupName: string | null;
+  targetGroupId: string | null;
+  targetSubId: string | null;
+  targetBuyerSubId: string | null;
+  requestUrl: string | null;
+  httpMethod: string | null;
+  requestStatus: string | null;
+  httpStatusCode: number | null;
+  durationMs: number | null;
+  routePriority: number | null;
+  routeWeight: number | null;
+  accepted: boolean | null;
+  winning: boolean | null;
+  bidAmount: number | null;
+  minDurationSeconds: number | null;
+  rejectReason: string | null;
+  errorCode: number | null;
+  errorMessage: string | null;
+  errors: string[];
+  requestBody: Record<string, unknown> | string | null;
+  responseBody: Record<string, unknown> | string | null;
+  summaryReason: string | null;
+  rawEventJson: Record<string, unknown>;
+}
+
+export interface InvestigationSourceContext {
+  fileName: string;
+  rowNumber: number;
+  bidDt: string | null;
+  bidAmount: number | null;
+  reasonForReject: string | null;
+  rowJson: Record<string, unknown>;
 }
 
 export interface NormalizedBidData {
@@ -57,14 +110,23 @@ export interface NormalizedBidData {
   buyerId: string | null;
   bidAmount: number | null;
   winningBid: number | null;
+  bidElapsedMs: number | null;
   isZeroBid: boolean;
   reasonForReject: string | null;
   httpStatusCode: number | null;
   errorMessage: string | null;
+  primaryFailureStage: FailureStage;
+  primaryTargetName: string | null;
+  primaryTargetId: string | null;
+  primaryBuyerName: string | null;
+  primaryBuyerId: string | null;
+  primaryErrorCode: number | null;
+  primaryErrorMessage: string | null;
   requestBody: Record<string, unknown> | string | null;
   responseBody: Record<string, unknown> | string | null;
   rawTraceJson: Record<string, unknown>;
   relevantEvents: BidEvent[];
+  targetAttempts: BidTargetAttempt[];
   outcome: InvestigationOutcome;
 }
 
@@ -108,8 +170,14 @@ export interface InvestigationListItem {
   targetName: string | null;
   bidAmount: number | null;
   winningBid: number | null;
+  bidElapsedMs: number | null;
   isZeroBid: boolean;
   httpStatusCode: number | null;
+  primaryFailureStage: FailureStage;
+  primaryTargetName: string | null;
+  primaryBuyerName: string | null;
+  primaryErrorCode: number | null;
+  primaryErrorMessage: string | null;
   rootCause: RootCause;
   ownerType: OwnerType;
   severity: DiagnosisSeverity;
@@ -123,6 +191,8 @@ export interface InvestigationListItem {
 
 export interface InvestigationDetail extends PersistedBidInvestigation {
   events: BidEvent[];
+  targetAttempts: BidTargetAttempt[];
+  sourceContext: InvestigationSourceContext | null;
 }
 
 export interface InvestigationsPageData {

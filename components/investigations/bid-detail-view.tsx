@@ -7,6 +7,14 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { JsonView } from "@/components/shared/json-view";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import type { InvestigationDetail } from "@/types/bid";
 import {
   formatCurrency,
@@ -38,6 +46,22 @@ function fetchStatusVariant(fetchStatus: InvestigationDetail["fetchStatus"]) {
   return "warning";
 }
 
+function failureStageVariant(stage: InvestigationDetail["primaryFailureStage"]) {
+  if (stage === "accepted") {
+    return "success";
+  }
+
+  if (stage === "zero_bid") {
+    return "warning";
+  }
+
+  if (stage === "target_rejected" || stage === "fetch_failed") {
+    return "destructive";
+  }
+
+  return "default";
+}
+
 export function BidDetailView({
   investigation,
 }: {
@@ -45,6 +69,96 @@ export function BidDetailView({
 }) {
   return (
     <div className="space-y-6">
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle>Failure Summary</CardTitle>
+            <CardDescription>
+              The highest-signal target, stage, and error extracted from the Ringba bid trace.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant={failureStageVariant(investigation.primaryFailureStage)}>
+                {toSentenceCase(investigation.primaryFailureStage)}
+              </Badge>
+              {investigation.primaryErrorCode !== null ? (
+                <Badge variant="destructive">Code {investigation.primaryErrorCode}</Badge>
+              ) : null}
+              <Badge variant={fetchStatusVariant(investigation.fetchStatus)}>
+                {toSentenceCase(investigation.fetchStatus)}
+              </Badge>
+              <Badge variant={severityVariant(investigation.severity)}>
+                {toSentenceCase(investigation.severity)}
+              </Badge>
+            </div>
+            <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              <div>
+                <dt className="text-sm text-slate-500">Primary Target</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.primaryTargetName ?? investigation.targetName ?? "-"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Primary Buyer</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.primaryBuyerName ?? investigation.buyerName ?? "-"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Bid Elapsed</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.bidElapsedMs ?? "-"}
+                </dd>
+              </div>
+            </dl>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="text-sm font-medium text-slate-900">Decisive Error</p>
+              <p className="mt-2 text-sm leading-6 text-slate-700">
+                {investigation.primaryErrorMessage ??
+                  investigation.errorMessage ??
+                  investigation.reasonForReject ??
+                  "No decisive error message was extracted."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Diagnosis</CardTitle>
+            <CardDescription>
+              Plain-English explanation with owner and suggested next step.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="info">
+                {toSentenceCase(investigation.rootCause)}
+              </Badge>
+              <Badge variant="default">
+                {toSentenceCase(investigation.ownerType)}
+              </Badge>
+            </div>
+            <p className="text-sm leading-6 text-slate-700">
+              {investigation.explanation}
+            </p>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Suggested Fix</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.suggestedFix}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Confidence</p>
+              <p className="mt-1 text-sm text-slate-600">
+                {Math.round(investigation.confidence * 100)}%
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
@@ -72,6 +186,12 @@ export function BidDetailView({
                 <dt className="text-sm text-slate-500">Publisher</dt>
                 <dd className="font-medium text-slate-900">
                   {investigation.publisherName ?? "-"}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Bid Elapsed Ms</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.bidElapsedMs ?? "-"}
                 </dd>
               </div>
               <div>
@@ -116,73 +236,145 @@ export function BidDetailView({
 
         <Card>
           <CardHeader>
-            <CardTitle>Diagnosis</CardTitle>
+            <CardTitle>Fetch Lifecycle</CardTitle>
             <CardDescription>
-              Plain-English explanation with owner and suggested next step.
+              Trace freshness and investigation status.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="flex flex-wrap gap-2">
-              <Badge variant="info">
-                {toSentenceCase(investigation.rootCause)}
-              </Badge>
-              <Badge variant={fetchStatusVariant(investigation.fetchStatus)}>
-                {toSentenceCase(investigation.fetchStatus)}
-              </Badge>
-              <Badge variant={severityVariant(investigation.severity)}>
-                {toSentenceCase(investigation.severity)}
-              </Badge>
-              <Badge variant="default">
-                {toSentenceCase(investigation.ownerType)}
-              </Badge>
-            </div>
-            <p className="text-sm leading-6 text-slate-700">
-              {investigation.explanation}
-            </p>
             <div>
-              <p className="text-sm font-medium text-slate-900">Suggested Fix</p>
+              <p className="text-sm font-medium text-slate-900">Started</p>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                {investigation.suggestedFix}
+                {formatDateTime(investigation.fetchStartedAt)}
               </p>
             </div>
             <div>
-              <p className="text-sm font-medium text-slate-900">Confidence</p>
+              <p className="text-sm font-medium text-slate-900">Last Fetched</p>
               <p className="mt-1 text-sm text-slate-600">
-                {Math.round(investigation.confidence * 100)}%
+                {formatDateTime(investigation.fetchedAt)}
               </p>
             </div>
             <div>
-              <p className="text-sm font-medium text-slate-900">Fetch Lifecycle</p>
+              <p className="text-sm font-medium text-slate-900">Attempts</p>
               <p className="mt-1 text-sm leading-6 text-slate-600">
-                Started {formatDateTime(investigation.fetchStartedAt)}. Last fetched{" "}
-                {formatDateTime(investigation.fetchedAt)}. Attempts{" "}
                 {investigation.fetchAttemptCount}.
               </p>
-              {investigation.lastError ? (
-                <p className="mt-2 text-sm leading-6 text-rose-600">
-                  Last error: {investigation.lastError}
-                </p>
-              ) : null}
             </div>
-            <div>
-              <p className="text-sm font-medium text-slate-900">Evidence</p>
-              <ul className="mt-2 space-y-2 text-sm text-slate-600">
-                {investigation.evidence.map((item, index) => (
-                  <li key={`${item.field}-${index}`} className="rounded-lg bg-slate-50 p-3">
-                    <span className="font-medium text-slate-900">{item.field}:</span>{" "}
-                    {String(item.value ?? "-")} - {item.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
+            {investigation.lastError ? (
+              <p className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm leading-6 text-rose-700">
+                Last error: {investigation.lastError}
+              </p>
+            ) : null}
           </CardContent>
         </Card>
       </div>
 
+      {investigation.sourceContext ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Source Context</CardTitle>
+            <CardDescription>
+              Values preserved from the imported Ringba source row for this bid.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-6 lg:grid-cols-2">
+            <dl className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <dt className="text-sm text-slate-500">Source File</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.sourceContext.fileName}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Row Number</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.sourceContext.rowNumber}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Source Bid Time</dt>
+                <dd className="font-medium text-slate-900">
+                  {formatDateTime(investigation.sourceContext.bidDt)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm text-slate-500">Source Reject Reason</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.sourceContext.reasonForReject ?? "-"}
+                </dd>
+              </div>
+            </dl>
+            <JsonView value={investigation.sourceContext.rowJson} />
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Target Attempts</CardTitle>
+          <CardDescription>
+            One row per ping target with the extracted request, response, and failure details.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {investigation.targetAttempts.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+              No target-level attempts were extracted from the Ringba payload.
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>#</TableHead>
+                  <TableHead>Target</TableHead>
+                  <TableHead>Buyer</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Bid</TableHead>
+                  <TableHead>HTTP</TableHead>
+                  <TableHead>Error</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {investigation.targetAttempts.map((attempt) => (
+                  <TableRow key={attempt.id ?? `${attempt.sequence}-${attempt.targetName}`}>
+                    <TableCell>{attempt.sequence}</TableCell>
+                    <TableCell>{attempt.targetName ?? "-"}</TableCell>
+                    <TableCell>{attempt.targetBuyer ?? "-"}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge variant={attempt.winning ? "success" : attempt.accepted ? "info" : "default"}>
+                          {attempt.winning
+                            ? "Winning"
+                            : attempt.accepted
+                              ? "Accepted"
+                              : "Rejected"}
+                        </Badge>
+                        {attempt.errorCode !== null ? (
+                          <Badge variant="destructive">Code {attempt.errorCode}</Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                    <TableCell>{formatCurrency(attempt.bidAmount)}</TableCell>
+                    <TableCell>{attempt.httpStatusCode ?? "-"}</TableCell>
+                    <TableCell className="max-w-sm text-sm text-slate-600">
+                      {attempt.errorMessage ??
+                        attempt.rejectReason ??
+                        attempt.summaryReason ??
+                        attempt.errors[0] ??
+                        "-"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Request Body</CardTitle>
+            <CardTitle>Decisive Request Body</CardTitle>
           </CardHeader>
           <CardContent>
             <JsonView value={investigation.requestBody} />
@@ -190,13 +382,29 @@ export function BidDetailView({
         </Card>
         <Card>
           <CardHeader>
-            <CardTitle>Response Body</CardTitle>
+            <CardTitle>Decisive Response Body</CardTitle>
           </CardHeader>
           <CardContent>
             <JsonView value={investigation.responseBody} />
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Evidence</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <ul className="space-y-2 text-sm text-slate-600">
+            {investigation.evidence.map((item, index) => (
+              <li key={`${item.field}-${index}`} className="rounded-lg bg-slate-50 p-3">
+                <span className="font-medium text-slate-900">{item.field}:</span>{" "}
+                {String(item.value ?? "-")} - {item.description}
+              </li>
+            ))}
+          </ul>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

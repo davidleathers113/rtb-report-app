@@ -7,13 +7,17 @@ import { investigationsQuerySchema } from "@/lib/validation/investigations";
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
-    const parsed = investigationsQuerySchema.parse({
-      page: 1,
-      pageSize: 1000,
+    const parsed = investigationsQuerySchema
+      .pick({
+        rootCause: true,
+        ownerType: true,
+        search: true,
+      })
+      .parse({
       rootCause: searchParams.get("rootCause") ?? undefined,
       ownerType: searchParams.get("ownerType") ?? undefined,
       search: searchParams.get("search") ?? undefined,
-    });
+      });
 
     const rows = await getInvestigationsForExport(parsed);
     const csv = buildCsv(

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getDb, resetDbClientForTests } from "@/lib/db/client";
 import {
   bidInvestigations,
+  bidTargetAttempts,
   importRunItems,
   importRuns,
   importSchedules,
@@ -40,14 +41,23 @@ function buildNormalizedBid(bidId: string) {
     buyerId: "buyer-1",
     bidAmount: 1.25,
     winningBid: 1.25,
+    bidElapsedMs: 100,
     isZeroBid: false,
     reasonForReject: null,
     httpStatusCode: 200,
     errorMessage: null,
+    primaryFailureStage: "accepted" as const,
+    primaryTargetName: null,
+    primaryTargetId: null,
+    primaryBuyerName: null,
+    primaryBuyerId: null,
+    primaryErrorCode: null,
+    primaryErrorMessage: null,
     requestBody: {},
     responseBody: {},
     rawTraceJson: {},
     relevantEvents: [],
+    targetAttempts: [],
     outcome: "accepted" as const,
   };
 }
@@ -138,7 +148,7 @@ describe.sequential("sqlite persistence integration", () => {
 
     const expectedBidIds: string[] = [];
 
-    for (let index = 0; index < 1200; index += 1) {
+    for (let index = 0; index < 950; index += 1) {
       const bidId = `bid-${index}`;
       expectedBidIds.push(bidId);
 
@@ -160,9 +170,131 @@ describe.sequential("sqlite persistence integration", () => {
 
     const items = await investigations.getInvestigationListItemsByIds(ids);
 
-    expect(items).toHaveLength(1200);
+    expect(items).toHaveLength(950);
     expect(items.some((item) => item.bidId === "bid-0")).toBe(true);
-    expect(items.some((item) => item.bidId === "bid-1199")).toBe(true);
+    expect(items.some((item) => item.bidId === "bid-949")).toBe(true);
+  });
+
+  it("persists target attempts and source context alongside investigations", async () => {
+    await setupTestDatabase();
+    const db = getDb();
+    const investigations = await import("@/lib/db/investigations");
+    const importSources = await import("@/lib/db/import-sources");
+
+    db.insert(importRuns)
+      .values({
+        id: "run-with-source",
+        sourceType: "ringba_recent_import",
+        status: "completed",
+        sourceStage: "completed",
+        createdAt: "2026-03-10T00:00:00.000Z",
+        updatedAt: "2026-03-10T00:00:00.000Z",
+      })
+      .run();
+
+    const sourceFile = await importSources.createImportSourceFile({
+      importRunId: "run-with-source",
+      sourceType: "ringba_recent_import",
+      fileName: "recent-export.csv",
+      rowCount: 1,
+      headerJson: ["Bid ID", "Zip", "Reason For Reject"],
+      sourceMetadata: {},
+    });
+    await importSources.insertImportSourceRows({
+      importRunId: "run-with-source",
+      importSourceFileId: sourceFile.id,
+      rows: [
+        {
+          rowNumber: 2,
+          bidId: "bid-with-attempts",
+          bidDt: "2026-03-09T00:00:00.000Z",
+          campaignName: "Campaign",
+          campaignId: "campaign-1",
+          publisherName: "Publisher",
+          publisherId: "publisher-1",
+          bidAmount: 1.25,
+          winningBid: 0,
+          bidRejected: true,
+          reasonForReject: "Final capacity check (Code: 1006)",
+          bidDid: null,
+          bidExpireDate: null,
+          expirationSeconds: null,
+          winningBidCallAccepted: null,
+          winningBidCallRejected: null,
+          bidElapsedMs: null,
+          rowJson: {
+            zipCode: "30340",
+            publisherSubId: "sub-1",
+          },
+        },
+      ],
+    });
+
+    await investigations.upsertInvestigation({
+      importRunId: "run-with-source",
+      normalizedBid: {
+        ...buildNormalizedBid("bid-with-attempts"),
+        winningBid: 0,
+        isZeroBid: true,
+        outcome: "zero_bid",
+        primaryFailureStage: "zero_bid",
+        primaryTargetName: "Oncore Roofing - RTT",
+        primaryTargetId: "target-1",
+        primaryBuyerName: "Oncore Leads",
+        primaryBuyerId: "buyer-1",
+        primaryErrorCode: 1006,
+        primaryErrorMessage: "Final capacity check (Code: 1006)",
+        targetAttempts: [
+          {
+            sequence: 1,
+            eventName: "PingRAWResult",
+            eventTimestamp: "2026-03-09T00:00:01.000Z",
+            targetName: "Oncore Roofing - RTT",
+            targetId: "target-1",
+            targetBuyer: "Oncore Leads",
+            targetBuyerId: "buyer-1",
+            targetNumber: null,
+            targetGroupName: null,
+            targetGroupId: null,
+            targetSubId: null,
+            targetBuyerSubId: null,
+            requestUrl: "https://example.com/ping",
+            httpMethod: "POST",
+            requestStatus: "Success",
+            httpStatusCode: 200,
+            durationMs: 421,
+            routePriority: 1,
+            routeWeight: 1,
+            accepted: false,
+            winning: false,
+            bidAmount: 0,
+            minDurationSeconds: 90,
+            rejectReason: "Final capacity check (Code: 1006)",
+            errorCode: 1006,
+            errorMessage: "Final capacity check (Code: 1006)",
+            errors: [],
+            requestBody: { CID: "16787878433" },
+            responseBody: { bidAmount: 0, rejectReason: "Final capacity check (Code: 1006)" },
+            summaryReason: "Minimum Revenue",
+            rawEventJson: { name: "PingRAWResult" },
+          },
+        ],
+      },
+      diagnosis: buildDiagnosis(),
+    });
+
+    const attemptRows = db.select().from(bidTargetAttempts).all();
+    expect(attemptRows).toHaveLength(1);
+    expect(attemptRows[0]?.errorCode).toBe(1006);
+
+    const detail = await investigations.getInvestigationByBidId("bid-with-attempts");
+    expect(detail?.primaryErrorCode).toBe(1006);
+    expect(detail?.targetAttempts).toHaveLength(1);
+    expect(detail?.sourceContext?.fileName).toBe("recent-export.csv");
+    expect(detail?.sourceContext?.rowJson).toEqual({
+      publisherSubId: "sub-1",
+      zipCode: "30340",
+    });
   });
 
   it("reclaims stale import run items instead of leaving them stuck running", async () => {

@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { JsonView } from "@/components/shared/json-view";
 import { Textarea } from "@/components/ui/textarea";
 import { parseBidIds } from "@/lib/utils/bid-input";
+import { toSentenceCase } from "@/lib/utils";
 import type { InvestigationListItem } from "@/types/bid";
 import type {
   CsvDirectPreviewResult,
@@ -64,6 +65,20 @@ const ringbaRecentImportStageLabels: Record<string, string> = {
   completed: "Completed",
   failed: "Failed",
 };
+
+function bumpMetric(map: Map<string, number>, key: string | null | undefined) {
+  if (!key) {
+    return;
+  }
+
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function topMetrics(map: Map<string, number>, limit: number) {
+  return Array.from(map.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, limit);
+}
 
 function progressTone(percentComplete: number) {
   if (percentComplete >= 100) {
@@ -325,6 +340,26 @@ export function BulkInvestigationClient({
         Boolean(investigation),
       );
   }, [activeRun]);
+  const processedInvestigationSummary = useMemo(() => {
+    const stageCounts = new Map<string, number>();
+    const errorCounts = new Map<string, number>();
+    const targetCounts = new Map<string, number>();
+    const buyerCounts = new Map<string, number>();
+
+    for (const investigation of processedInvestigations) {
+      bumpMetric(stageCounts, investigation.primaryFailureStage);
+      bumpMetric(errorCounts, investigation.primaryErrorMessage);
+      bumpMetric(targetCounts, investigation.primaryTargetName ?? investigation.targetName);
+      bumpMetric(buyerCounts, investigation.primaryBuyerName);
+    }
+
+    return {
+      stages: topMetrics(stageCounts, 6),
+      errors: topMetrics(errorCounts, 6),
+      targets: topMetrics(targetCounts, 6),
+      buyers: topMetrics(buyerCounts, 6),
+    };
+  }, [processedInvestigations]);
 
   useEffect(() => {
     if (!activeRunId || isTerminal) {
@@ -2631,6 +2666,60 @@ export function BulkInvestigationClient({
                   <p className="text-sm text-slate-500">
                     Investigations that already resolved into stored bid records.
                   </p>
+                </div>
+                <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">Failure Stages</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm text-slate-700">
+                      {processedInvestigationSummary.stages.map(([label, count]) => (
+                        <div key={label} className="flex items-center justify-between gap-3">
+                          <span>{toSentenceCase(label)}</span>
+                          <span className="font-medium text-slate-900">{count}</span>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">Top Errors</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm text-slate-700">
+                      {processedInvestigationSummary.errors.map(([label, count]) => (
+                        <div key={label} className="flex items-start justify-between gap-3">
+                          <span className="line-clamp-3">{label}</span>
+                          <span className="font-medium text-slate-900">{count}</span>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">Top Targets</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm text-slate-700">
+                      {processedInvestigationSummary.targets.map(([label, count]) => (
+                        <div key={label} className="flex items-center justify-between gap-3">
+                          <span className="line-clamp-2">{label}</span>
+                          <span className="font-medium text-slate-900">{count}</span>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-base">Top Buyers</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-2 text-sm text-slate-700">
+                      {processedInvestigationSummary.buyers.map(([label, count]) => (
+                        <div key={label} className="flex items-center justify-between gap-3">
+                          <span className="line-clamp-2">{label}</span>
+                          <span className="font-medium text-slate-900">{count}</span>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
                 </div>
                 <InvestigationTable items={processedInvestigations} />
               </div>
