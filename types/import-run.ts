@@ -23,9 +23,33 @@ export const IMPORT_RUN_ITEM_RESOLUTIONS = [
   "skipped",
 ] as const;
 
+export const IMPORT_RUN_SOURCE_STAGES = [
+  "creating_export",
+  "polling_export",
+  "downloading",
+  "extracting",
+  "parsing",
+  "queued",
+  "processing",
+  "completed",
+  "failed",
+] as const;
+
+export const IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES = [
+  "pending",
+  "ready",
+  "downloaded",
+  "extracted",
+  "parsed",
+  "failed",
+] as const;
+
 export type ImportRunStatus = (typeof IMPORT_RUN_STATUSES)[number];
 export type ImportRunItemStatus = (typeof IMPORT_RUN_ITEM_STATUSES)[number];
 export type ImportRunItemResolution = (typeof IMPORT_RUN_ITEM_RESOLUTIONS)[number];
+export type ImportRunSourceStage = (typeof IMPORT_RUN_SOURCE_STAGES)[number];
+export type ImportRunExportDownloadStatus =
+  (typeof IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES)[number];
 
 export interface ImportRunItemSummary {
   id: string;
@@ -58,15 +82,58 @@ export interface ImportRunProgress {
 export interface ImportRunDetail extends ImportRunProgress {
   id: string;
   sourceType: string;
+  triggerType: "manual" | "scheduled";
+  scheduleId: string | null;
+  sourceStage: ImportRunSourceStage;
   status: ImportRunStatus;
   forceRefresh: boolean;
   notes: string | null;
   lastError: string | null;
+  sourceWindowStart: string | null;
+  sourceWindowEnd: string | null;
+  exportJobId: string | null;
+  exportRowCount: number;
+  exportDownloadStatus: ImportRunExportDownloadStatus | null;
+  sourceMetadata: Record<string, unknown>;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
   items: ImportRunItemSummary[];
+}
+
+export interface RingbaRecentImportDiagnostics {
+  windowMinutes?: number;
+  overlapMinutes?: number;
+  checkpointSourceKey?: string;
+  checkpointBidDt?: string | null;
+  reportStart?: string;
+  reportEnd?: string;
+  exportRequestUrl?: string;
+  exportJobCreatedAt?: string;
+  exportPollCount?: number;
+  exportPollStartedAt?: string;
+  exportReadyAt?: string;
+  exportReadyLatencyMs?: number;
+  exportJobStatus?: string;
+  exportDownloadUrl?: string;
+  exportDownloadedAt?: string;
+  downloadSizeBytes?: number;
+  exportFileName?: string;
+  extractedAt?: string;
+  parsedAt?: string;
+  parsedRowCount?: number;
+  extractedBidIdCount?: number;
+  dedupedBidIdCount?: number;
+  duplicateBidIdsRemoved?: number;
+  invalidBidIdCount?: number;
+  insertedItemCount?: number;
+  parsedHeaders?: string[];
+  sampleBidIds?: string[];
+  earliestBidDt?: string | null;
+  latestBidDt?: string | null;
+  failedStage?: string;
+  sourceStageError?: string;
 }
 
 export interface CsvPreviewColumnOption {

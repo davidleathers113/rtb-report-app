@@ -12,6 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { getInvestigations } from "@/lib/db/investigations";
+import { getImportSchedules } from "@/lib/import-schedules/service";
 
 export default async function InvestigationsPage() {
   const recentInvestigations =
@@ -24,6 +25,10 @@ export default async function InvestigationsPage() {
       page: 1,
       pageSize: 25,
     };
+  const importSchedules = (await getImportSchedules().catch(() => [])) ?? [];
+  const canManualTriggerSchedules =
+    process.env.NODE_ENV !== "production" ||
+    !(process.env.IMPORT_SCHEDULES_TRIGGER_SECRET?.trim());
 
   return (
     <AppShell currentPath="/investigations">
@@ -43,7 +48,10 @@ export default async function InvestigationsPage() {
           </Button>
         </div>
 
-        <BulkInvestigationClient />
+        <BulkInvestigationClient
+          initialSchedules={importSchedules}
+          canManualTriggerSchedules={canManualTriggerSchedules}
+        />
 
         <Card>
           <CardHeader>

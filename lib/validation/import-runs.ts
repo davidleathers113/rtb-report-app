@@ -14,3 +14,8 @@ export const retryImportRunSchema = z.object({
 export const rerunImportRunSchema = z.object({
   forceRefresh: z.boolean().optional().default(false),
 });
+
+export const createRingbaRecentImportRunSchema = z.object({
+  windowMinutes: z.union([z.literal(5), z.literal(15), z.literal(60)]),
+  forceRefresh: z.boolean().optional().default(false),
+});

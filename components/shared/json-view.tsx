@@ -18,7 +18,7 @@ export function JsonView({
   }
 
   return (
-    <pre className="max-h-[28rem] overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-6 text-slate-100">
+    <pre className="max-h-112 overflow-auto rounded-lg bg-slate-950 p-4 text-xs leading-6 text-slate-100">
       {content}
     </pre>
   );

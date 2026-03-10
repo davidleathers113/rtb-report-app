@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db/import-runs", () => ({
+  addImportRunItems: vi.fn(),
   claimImportRunItems: vi.fn(),
   claimImportRunProcessing: vi.fn(),
   completeImportRunItem: vi.fn(),
@@ -9,8 +10,11 @@ vi.mock("@/lib/db/import-runs", () => ({
   finalizeImportRun: vi.fn(),
   getImportRunBidIds: vi.fn(),
   getImportRunDetail: vi.fn(),
+  getImportSourceCheckpoint: vi.fn(),
   markImportRunFailed: vi.fn(),
   resetFailedImportRunItems: vi.fn(),
+  updateImportRunSourceState: vi.fn(),
+  upsertImportSourceCheckpoint: vi.fn(),
 }));
 
 vi.mock("@/lib/investigations/service", () => ({
@@ -40,10 +44,19 @@ function buildRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
   return {
     id: "run-1",
     sourceType: "manual_bulk",
+    triggerType: "manual",
+    scheduleId: null,
+    sourceStage: "queued",
     status: "queued",
     forceRefresh: false,
     notes: null,
     lastError: null,
+    sourceWindowStart: null,
+    sourceWindowEnd: null,
+    exportJobId: null,
+    exportRowCount: 0,
+    exportDownloadStatus: null,
+    sourceMetadata: {},
     startedAt: "2026-03-09T00:00:00.000Z",
     completedAt: null,
     createdAt: "2026-03-09T00:00:00.000Z",
@@ -98,6 +111,7 @@ describe("import runs service", () => {
     vi.mocked(claimImportRunItems).mockResolvedValue([
       { id: "item-1", bidId: "bid-1", position: 1 },
     ]);
+    vi.mocked(getImportRunDetail).mockResolvedValue(buildRun());
     vi.mocked(investigateBid).mockResolvedValue({
       resolution: "reused",
       investigation: {

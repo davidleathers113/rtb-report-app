@@ -2,6 +2,13 @@ import "server-only";
 
 import { safeJsonParse } from "@/lib/utils/json";
 
+export interface RingbaConfig {
+  accountId: string;
+  apiToken: string;
+  apiBaseUrl: string;
+  authScheme: string;
+}
+
 export interface RingbaFetchResult {
   bidId: string;
   requestUrl: string;
@@ -23,12 +30,12 @@ function getRequiredEnv(name: string) {
   return value;
 }
 
-function getRingbaConfig() {
+export function getRingbaConfig(): RingbaConfig {
   return {
     accountId: getRequiredEnv("RINGBA_ACCOUNT_ID"),
     apiToken: getRequiredEnv("RINGBA_API_TOKEN"),
     apiBaseUrl: process.env.RINGBA_API_BASE_URL ?? "https://api.ringba.com",
-    authScheme: process.env.RINGBA_AUTH_SCHEME ?? "Bearer",
+    authScheme: process.env.RINGBA_AUTH_SCHEME ?? "Token",
   };
 }
 

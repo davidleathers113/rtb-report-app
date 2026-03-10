@@ -60,11 +60,22 @@ function detectHeaderIndex(row: string[]) {
   return matchingIndices;
 }
 
-function countLikelyBidIds(row: string[]) {
+function valueContainsDigit(value: string) {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code >= 48 && code <= 57) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function countValuesWithDigits(row: string[]) {
   let count = 0;
 
   for (const value of row) {
-    if (isValidBidId(value)) {
+    if (valueContainsDigit(value)) {
       count += 1;
     }
   }
@@ -137,10 +148,16 @@ function parseCsvRows(csvText: string) {
     skipEmptyLines: true,
   });
 
-  if (result.errors.length > 0) {
-    const firstError = result.errors[0];
+  const meaningfulErrors = result.errors.filter((error) => {
+    return error.type !== "Delimiter";
+  });
+
+  if (meaningfulErrors.length > 0) {
+    const firstError = meaningfulErrors[0];
+    const rowNumber =
+      typeof firstError.row === "number" ? firstError.row + 1 : 1;
     throw new Error(
-      `Malformed CSV near row ${firstError.row + 1}: ${firstError.message}`,
+      `Malformed CSV near row ${rowNumber}: ${firstError.message}`,
     );
   }
 
@@ -152,12 +169,14 @@ function resolveSelectedColumnIndex(input: {
   selectedColumnKey?: string;
 }) {
   const firstRow = input.rows[0] ?? [];
+  const secondRow = input.rows[1] ?? [];
   const detectedHeaderIndices = detectHeaderIndex(firstRow);
   const firstRowLikelyHeader =
+    (Boolean(input.selectedColumnKey) && firstRow.length > 1) ||
     detectedHeaderIndices.length > 0 ||
     (firstRow.length > 1 &&
-      countLikelyBidIds(firstRow) === 0 &&
-      input.rows.length > 1);
+      input.rows.length > 1 &&
+      countValuesWithDigits(firstRow) < countValuesWithDigits(secondRow));
   const headerDetected = firstRowLikelyHeader;
   const columnOptions: CsvPreviewColumnOption[] = headerDetected
     ? buildColumnOptions(firstRow)
