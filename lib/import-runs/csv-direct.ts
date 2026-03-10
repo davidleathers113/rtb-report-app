@@ -24,7 +24,7 @@ import {
   updateImportSourceFile,
 } from "@/lib/db/import-sources";
 import { buildCsvDiagnosis } from "@/lib/diagnostics/csv-direct";
-import { upsertInvestigation } from "@/lib/db/investigations";
+import { getInvestigationByBidId, upsertInvestigation } from "@/lib/db/investigations";
 import { isValidBidId } from "@/lib/utils/bid-id";
 import type { CsvDirectPreviewResult } from "@/types/import-run";
 import type { NormalizedBidData } from "@/types/bid";
@@ -1085,6 +1085,14 @@ export async function processCsvDirectImportItem(input: {
     throw new Error(`CSV source row missing bid id for run ${input.importRunId}.`);
   }
 
+  const existing = await getInvestigationByBidId(normalizedBid.bidId);
+  if (existing?.enrichmentState === "enriched") {
+    return {
+      investigationId: existing.id,
+      resolution: "reused" as const,
+    };
+  }
+
   const diagnosis = buildCsvDiagnosis({
     normalizedBid,
     sourceRow: row,
@@ -1094,6 +1102,17 @@ export async function processCsvDirectImportItem(input: {
     importRunId: input.importRunId,
     normalizedBid,
     diagnosis,
+    persistence: {
+      detailSource: "csv_direct",
+      enrichmentState: "csv_only",
+      sourceImportRunId: input.importRunId,
+      sourceImportSourceFileId: row.importSourceFileId,
+      sourceImportSourceRowId: row.id,
+      lastRingbaAttemptAt: existing?.lastRingbaAttemptAt ?? null,
+      lastRingbaFetchAt: existing?.lastRingbaFetchAt ?? null,
+      ringbaFailureCount: existing?.ringbaFailureCount ?? 0,
+      nextRingbaRetryAt: existing?.nextRingbaRetryAt ?? null,
+    },
   });
 
   if (!investigation) {

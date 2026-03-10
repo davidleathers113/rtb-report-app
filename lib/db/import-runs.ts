@@ -25,6 +25,7 @@ import type {
   ImportRunItemResolution,
   ImportRunItemStatus,
   ImportRunSourceStage,
+  ImportRunSourceType,
   ImportRunStatus,
 } from "@/types/import-run";
 
@@ -314,7 +315,7 @@ export async function getImportRunDetail(importRunId: string): Promise<ImportRun
 
   return {
     id: run.id,
-    sourceType: run.sourceType,
+    sourceType: run.sourceType as ImportRunSourceType,
     triggerType: run.triggerType as "manual" | "scheduled",
     scheduleId: run.scheduleId,
     sourceStage: run.sourceStage as ImportRunSourceStage,

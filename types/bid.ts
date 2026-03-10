@@ -29,6 +29,15 @@ export const DIAGNOSIS_SEVERITIES = [
 
 export const OUTCOMES = ["accepted", "rejected", "zero_bid", "unknown"] as const;
 export const FETCH_STATUSES = ["pending", "fetched", "failed"] as const;
+export const DETAIL_SOURCES = ["csv_direct", "ringba_api"] as const;
+export const ENRICHMENT_STATES = [
+  "csv_only",
+  "queued",
+  "fetching",
+  "enriched",
+  "not_found",
+  "failed",
+] as const;
 export const FAILURE_STAGES = [
   "accepted",
   "target_rejected",
@@ -43,6 +52,8 @@ export type OwnerType = (typeof OWNER_TYPES)[number];
 export type DiagnosisSeverity = (typeof DIAGNOSIS_SEVERITIES)[number];
 export type InvestigationOutcome = (typeof OUTCOMES)[number];
 export type FetchStatus = (typeof FETCH_STATUSES)[number];
+export type DetailSource = (typeof DETAIL_SOURCES)[number];
+export type EnrichmentState = (typeof ENRICHMENT_STATES)[number];
 export type FailureStage = (typeof FAILURE_STAGES)[number];
 
 export interface BidEvent {
@@ -149,10 +160,16 @@ export interface DiagnosisResult {
 export interface PersistedBidInvestigation extends NormalizedBidData, DiagnosisResult {
   id: string;
   importRunId: string | null;
+  detailSource: DetailSource;
+  enrichmentState: EnrichmentState;
   fetchStatus: FetchStatus;
   fetchedAt: string | null;
   fetchStartedAt: string | null;
   lastError: string | null;
+  lastRingbaAttemptAt: string | null;
+  lastRingbaFetchAt: string | null;
+  ringbaFailureCount: number;
+  nextRingbaRetryAt: string | null;
   refreshRequestedAt: string | null;
   leaseExpiresAt: string | null;
   fetchAttemptCount: number;
@@ -183,6 +200,8 @@ export interface InvestigationListItem {
   severity: DiagnosisSeverity;
   explanation: string;
   outcome: InvestigationOutcome;
+  detailSource: DetailSource;
+  enrichmentState: EnrichmentState;
   fetchStatus: FetchStatus;
   fetchedAt: string | null;
   lastError: string | null;

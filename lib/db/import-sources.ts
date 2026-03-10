@@ -287,6 +287,28 @@ export async function getImportSourceRowContextForBidId(input: {
   return row ?? null;
 }
 
+export async function getImportSourceRowContextById(
+  sourceRowId: string,
+): Promise<ImportSourceRowContext | null> {
+  const db = getDb();
+  const row = db
+    .select({
+      fileName: importSourceFiles.fileName,
+      rowNumber: importSourceRows.rowNumber,
+      bidId: importSourceRows.bidId,
+      bidDt: importSourceRows.bidDt,
+      bidAmount: importSourceRows.bidAmount,
+      reasonForReject: importSourceRows.reasonForReject,
+      rowJson: importSourceRows.rowJson,
+    })
+    .from(importSourceRows)
+    .leftJoin(importSourceFiles, eq(importSourceRows.importSourceFileId, importSourceFiles.id))
+    .where(eq(importSourceRows.id, sourceRowId))
+    .get() as ImportSourceRowContext | undefined;
+
+  return row ?? null;
+}
+
 export interface ImportSourceFileSummary {
   id: string;
   importRunId: string;

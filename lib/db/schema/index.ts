@@ -10,6 +10,21 @@ export const bidInvestigations = sqliteTable(
     importRunId: text("import_run_id").references(() => importRuns.id, {
       onDelete: "set null",
     }),
+    sourceImportRunId: text("source_import_run_id").references(() => importRuns.id, {
+      onDelete: "set null",
+    }),
+    sourceImportSourceFileId: text("source_import_source_file_id").references(
+      () => importSourceFiles.id,
+      {
+        onDelete: "set null",
+      },
+    ),
+    sourceImportSourceRowId: text("source_import_source_row_id").references(
+      () => importSourceRows.id,
+      {
+        onDelete: "set null",
+      },
+    ),
     bidId: text("bid_id").notNull(),
     bidDt: text("bid_dt"),
     campaignName: text("campaign_name"),
@@ -45,10 +60,16 @@ export const bidInvestigations = sqliteTable(
     suggestedFix: text("suggested_fix").notNull().default(""),
     explanation: text("explanation").notNull().default(""),
     evidenceJson: text("evidence_json", { mode: "json" }).notNull().default(sql`'[]'`),
+    detailSource: text("detail_source").notNull().default("ringba_api"),
+    enrichmentState: text("enrichment_state").notNull().default("enriched"),
     fetchStatus: text("fetch_status").notNull().default("pending"),
     fetchedAt: text("fetched_at"),
     fetchStartedAt: text("fetch_started_at"),
     lastError: text("last_error"),
+    lastRingbaAttemptAt: text("last_ringba_attempt_at"),
+    lastRingbaFetchAt: text("last_ringba_fetch_at"),
+    ringbaFailureCount: integer("ringba_failure_count").notNull().default(0),
+    nextRingbaRetryAt: text("next_ringba_retry_at"),
     refreshRequestedAt: text("refresh_requested_at"),
     leaseExpiresAt: text("lease_expires_at"),
     fetchAttemptCount: integer("fetch_attempt_count").notNull().default(0),
@@ -59,9 +80,18 @@ export const bidInvestigations = sqliteTable(
   (table) => ({
     bidIdUnique: uniqueIndex("bid_investigations_bid_id_unique").on(table.bidId),
     fetchStatusIdx: index("bid_investigations_fetch_status_idx").on(table.fetchStatus),
+    enrichmentStateIdx: index("bid_investigations_enrichment_state_idx").on(
+      table.enrichmentState,
+    ),
+    nextRingbaRetryAtIdx: index("bid_investigations_next_ringba_retry_at_idx").on(
+      table.nextRingbaRetryAt,
+    ),
     importedAtIdx: index("bid_investigations_imported_at_idx").on(table.importedAt),
     bidDtIdx: index("bid_investigations_bid_dt_idx").on(table.bidDt),
     importRunIdIdx: index("bid_investigations_import_run_id_idx").on(table.importRunId),
+    sourceImportRunIdIdx: index("bid_investigations_source_import_run_id_idx").on(
+      table.sourceImportRunId,
+    ),
   }),
 );
 
@@ -154,6 +184,7 @@ export const importSchedules = sqliteTable(
     windowMinutes: integer("window_minutes").notNull(),
     overlapMinutes: integer("overlap_minutes").notNull().default(2),
     maxConcurrentRuns: integer("max_concurrent_runs").notNull().default(1),
+    sourceMetadata: text("source_metadata", { mode: "json" }).notNull().default(sql`'{}'`),
     lastTriggeredAt: text("last_triggered_at"),
     lastSucceededAt: text("last_succeeded_at"),
     lastFailedAt: text("last_failed_at"),

@@ -1,9 +1,12 @@
 import "server-only";
 
-import { eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 
 import { getDb, getSqlite } from "@/lib/db/client";
-import { getImportSourceRowContextForBidId } from "@/lib/db/import-sources";
+import {
+  getImportSourceRowContextById,
+  getImportSourceRowContextForBidId,
+} from "@/lib/db/import-sources";
 import {
   bidEvents,
   bidInvestigations,
@@ -17,8 +20,10 @@ import { addSeconds, createId, nowIso, toTimestamp } from "@/lib/db/utils";
 import type {
   DashboardMetric,
   DashboardStats,
+  DetailSource,
   DashboardTimePoint,
   DiagnosisResult,
+  EnrichmentState,
   FetchStatus,
   InvestigationDetail,
   InvestigationListItem,
@@ -28,6 +33,20 @@ import type {
 } from "@/types/bid";
 
 const SQLITE_IN_ARRAY_CHUNK_SIZE = 900;
+
+function hasActiveTimestamp(value: string | null | undefined, referenceTime: string) {
+  const valueMs = toTimestamp(value ?? null);
+  const referenceMs = toTimestamp(referenceTime);
+  return valueMs !== null && referenceMs !== null && valueMs > referenceMs;
+}
+
+function hasReusableEnrichment(row: BidInvestigationRow) {
+  return (
+    row.fetchStatus === "fetched" &&
+    Boolean(row.fetchedAt) &&
+    row.enrichmentState === "enriched"
+  );
+}
 
 function splitIntoChunks<T>(values: T[], chunkSize: number) {
   const chunks: T[][] = [];
@@ -62,6 +81,8 @@ function toListItem(row: BidInvestigationRow): InvestigationListItem {
     severity: row.severity as InvestigationListItem["severity"],
     explanation: row.explanation,
     outcome: row.outcome as InvestigationListItem["outcome"],
+    detailSource: row.detailSource as InvestigationListItem["detailSource"],
+    enrichmentState: row.enrichmentState as InvestigationListItem["enrichmentState"],
     fetchStatus: row.fetchStatus as FetchStatus,
     fetchedAt: row.fetchedAt,
     lastError: row.lastError,
@@ -161,10 +182,16 @@ function toDetail(
     suggestedFix: row.suggestedFix,
     explanation: row.explanation,
     evidence: (row.evidenceJson ?? []) as DiagnosisResult["evidence"],
+    detailSource: row.detailSource as InvestigationDetail["detailSource"],
+    enrichmentState: row.enrichmentState as InvestigationDetail["enrichmentState"],
     fetchStatus: row.fetchStatus as FetchStatus,
     fetchedAt: row.fetchedAt,
     fetchStartedAt: row.fetchStartedAt,
     lastError: row.lastError,
+    lastRingbaAttemptAt: row.lastRingbaAttemptAt,
+    lastRingbaFetchAt: row.lastRingbaFetchAt,
+    ringbaFailureCount: row.ringbaFailureCount,
+    nextRingbaRetryAt: row.nextRingbaRetryAt,
     refreshRequestedAt: row.refreshRequestedAt,
     leaseExpiresAt: row.leaseExpiresAt,
     fetchAttemptCount: row.fetchAttemptCount,
@@ -236,7 +263,9 @@ interface ClaimBidInvestigationRow {
   id: string;
   bidId: string;
   fetchStatus: FetchStatus;
+  enrichmentState: EnrichmentState;
   shouldFetch: boolean;
+  blockReason: "reused" | "pending" | "retry_scheduled" | null;
   fetchedAt: string | null;
   lastError: string | null;
   fetchAttemptCount: number;
@@ -293,19 +322,49 @@ export async function completeImportRun(input: {
     .run();
 }
 
+interface InvestigationPersistenceOptions {
+  detailSource?: DetailSource;
+  enrichmentState?: EnrichmentState;
+  sourceImportRunId?: string | null;
+  sourceImportSourceFileId?: string | null;
+  sourceImportSourceRowId?: string | null;
+  lastRingbaAttemptAt?: string | null;
+  lastRingbaFetchAt?: string | null;
+  ringbaFailureCount?: number;
+  nextRingbaRetryAt?: string | null;
+}
+
 export async function upsertInvestigation(input: {
   importRunId: string | null;
   normalizedBid: NormalizedBidData;
   diagnosis: DiagnosisResult;
+  persistence?: InvestigationPersistenceOptions;
 }) {
   const db = getDb();
   const now = nowIso();
   const existing = await getBidInvestigationRowByBidId(input.normalizedBid.bidId);
   const investigationId = existing?.id ?? createId();
+  const detailSource = input.persistence?.detailSource ?? "ringba_api";
+  const enrichmentState = input.persistence?.enrichmentState ?? "enriched";
+  const sourceImportRunId =
+    input.persistence && "sourceImportRunId" in input.persistence
+      ? (input.persistence.sourceImportRunId ?? null)
+      : (existing?.sourceImportRunId ?? null);
+  const sourceImportSourceFileId =
+    input.persistence && "sourceImportSourceFileId" in input.persistence
+      ? (input.persistence.sourceImportSourceFileId ?? null)
+      : (existing?.sourceImportSourceFileId ?? null);
+  const sourceImportSourceRowId =
+    input.persistence && "sourceImportSourceRowId" in input.persistence
+      ? (input.persistence.sourceImportSourceRowId ?? null)
+      : (existing?.sourceImportSourceRowId ?? null);
 
   const rowToPersist = {
     id: investigationId,
     importRunId: input.importRunId,
+    sourceImportRunId,
+    sourceImportSourceFileId,
+    sourceImportSourceRowId,
     bidId: input.normalizedBid.bidId,
     bidDt: input.normalizedBid.bidDt,
     campaignName: input.normalizedBid.campaignName,
@@ -341,9 +400,30 @@ export async function upsertInvestigation(input: {
     suggestedFix: input.diagnosis.suggestedFix,
     explanation: input.diagnosis.explanation,
     evidenceJson: input.diagnosis.evidence,
+    detailSource,
+    enrichmentState,
     fetchStatus: "fetched" as const,
     fetchedAt: now,
     lastError: null,
+    lastRingbaAttemptAt:
+      input.persistence && "lastRingbaAttemptAt" in input.persistence
+        ? (input.persistence.lastRingbaAttemptAt ?? null)
+        : detailSource === "ringba_api"
+          ? now
+          : (existing?.lastRingbaAttemptAt ?? null),
+    lastRingbaFetchAt:
+      input.persistence && "lastRingbaFetchAt" in input.persistence
+        ? (input.persistence.lastRingbaFetchAt ?? null)
+        : detailSource === "ringba_api"
+          ? now
+          : (existing?.lastRingbaFetchAt ?? null),
+    ringbaFailureCount:
+      input.persistence?.ringbaFailureCount ??
+      (detailSource === "ringba_api" ? 0 : (existing?.ringbaFailureCount ?? 0)),
+    nextRingbaRetryAt:
+      input.persistence && "nextRingbaRetryAt" in input.persistence
+        ? (input.persistence.nextRingbaRetryAt ?? null)
+        : null,
     leaseExpiresAt: null,
     importedAt: now,
     updatedAt: now,
@@ -454,8 +534,11 @@ export async function claimInvestigationFetch(input: {
         bidId: input.bidId,
         rawTraceJson: {},
         evidenceJson: [],
+        detailSource: "ringba_api",
+        enrichmentState: "fetching",
         fetchStatus: "pending",
         fetchStartedAt: now,
+        lastRingbaAttemptAt: now,
         refreshRequestedAt: input.forceRefresh ? now : null,
         leaseExpiresAt,
         fetchAttemptCount: 1,
@@ -468,7 +551,9 @@ export async function claimInvestigationFetch(input: {
         id: created.id,
         bidId: input.bidId,
         fetchStatus: "pending" as FetchStatus,
+        enrichmentState: "fetching" as EnrichmentState,
         shouldFetch: true,
+        blockReason: null,
         fetchedAt: null,
         lastError: null,
         fetchAttemptCount: 1,
@@ -476,19 +561,17 @@ export async function claimInvestigationFetch(input: {
       } satisfies ClaimBidInvestigationRow;
     }
 
-    const activeLease = (() => {
-      const leaseMs = toTimestamp(existing.leaseExpiresAt);
-      const nowMs = toTimestamp(now);
-      return leaseMs !== null && nowMs !== null && leaseMs > nowMs;
-    })();
-    const hasReusableFetch = existing.fetchStatus === "fetched" && Boolean(existing.fetchedAt);
+    const activeLease = hasActiveTimestamp(existing.leaseExpiresAt, now);
+    const hasReusableFetch = hasReusableEnrichment(existing);
 
     if (!input.forceRefresh && hasReusableFetch) {
       return {
         id: existing.id,
         bidId: existing.bidId,
         fetchStatus: existing.fetchStatus as FetchStatus,
+        enrichmentState: existing.enrichmentState as EnrichmentState,
         shouldFetch: false,
+        blockReason: "reused",
         fetchedAt: existing.fetchedAt,
         lastError: existing.lastError,
         fetchAttemptCount: existing.fetchAttemptCount,
@@ -501,7 +584,24 @@ export async function claimInvestigationFetch(input: {
         id: existing.id,
         bidId: existing.bidId,
         fetchStatus: existing.fetchStatus as FetchStatus,
+        enrichmentState: existing.enrichmentState as EnrichmentState,
         shouldFetch: false,
+        blockReason: "pending",
+        fetchedAt: existing.fetchedAt,
+        lastError: existing.lastError,
+        fetchAttemptCount: existing.fetchAttemptCount,
+        leaseExpiresAt: existing.leaseExpiresAt,
+      } satisfies ClaimBidInvestigationRow;
+    }
+
+    if (!input.forceRefresh && hasActiveTimestamp(existing.nextRingbaRetryAt, now)) {
+      return {
+        id: existing.id,
+        bidId: existing.bidId,
+        fetchStatus: existing.fetchStatus as FetchStatus,
+        enrichmentState: existing.enrichmentState as EnrichmentState,
+        shouldFetch: false,
+        blockReason: "retry_scheduled",
         fetchedAt: existing.fetchedAt,
         lastError: existing.lastError,
         fetchAttemptCount: existing.fetchAttemptCount,
@@ -512,8 +612,11 @@ export async function claimInvestigationFetch(input: {
     db.update(bidInvestigations)
       .set({
         importRunId: input.importRunId,
+        detailSource: "ringba_api",
+        enrichmentState: "fetching",
         fetchStatus: "pending",
         fetchStartedAt: now,
+        lastRingbaAttemptAt: now,
         refreshRequestedAt: input.forceRefresh ? now : existing.refreshRequestedAt,
         leaseExpiresAt,
         lastError: null,
@@ -527,7 +630,9 @@ export async function claimInvestigationFetch(input: {
       id: existing.id,
       bidId: existing.bidId,
       fetchStatus: "pending" as FetchStatus,
+      enrichmentState: "fetching" as EnrichmentState,
       shouldFetch: true,
+      blockReason: null,
       fetchedAt: existing.fetchedAt,
       lastError: null,
       fetchAttemptCount: existing.fetchAttemptCount + 1,
@@ -539,7 +644,9 @@ export async function claimInvestigationFetch(input: {
     id: row.id,
     bidId: row.bidId,
     fetchStatus: row.fetchStatus,
+    enrichmentState: row.enrichmentState,
     shouldFetch: row.shouldFetch,
+    blockReason: row.blockReason,
     fetchedAt: row.fetchedAt,
     lastError: row.lastError,
     fetchAttemptCount: row.fetchAttemptCount,
@@ -554,16 +661,25 @@ export async function markInvestigationFetchFailed(input: {
   httpStatusCode?: number | null;
   responseBody?: Record<string, unknown> | string | null;
   rawTraceJson?: Record<string, unknown>;
+  enrichmentState?: Extract<EnrichmentState, "failed" | "not_found">;
+  nextRingbaRetryAt?: string | null;
 }) {
   const db = getDb();
   const now = nowIso();
   const existing = await getBidInvestigationRowByBidId(input.bidId);
   const shouldPreserveExistingData = Boolean(existing?.fetchedAt);
+  const nextFailureCount = (existing?.ringbaFailureCount ?? 0) + 1;
   const updatePayload: Record<string, unknown> = {
     importRunId: input.importRunId,
+    detailSource: "ringba_api",
+    enrichmentState: input.enrichmentState ?? "failed",
     fetchStatus: "failed",
     parsedErrorMessage: input.errorMessage,
     lastError: input.errorMessage,
+    lastRingbaAttemptAt: now,
+    ringbaFailureCount: nextFailureCount,
+    nextRingbaRetryAt:
+      input.nextRingbaRetryAt === undefined ? null : (input.nextRingbaRetryAt ?? null),
     primaryFailureStage: "fetch_failed",
     primaryErrorMessage: input.errorMessage,
     leaseExpiresAt: null,
@@ -607,9 +723,15 @@ export async function markInvestigationFetchFailed(input: {
         parsedErrorMessage: input.errorMessage,
         lastError: input.errorMessage,
         importRunId: input.importRunId,
+        detailSource: "ringba_api",
+        enrichmentState: input.enrichmentState ?? "failed",
         httpStatusCode: input.httpStatusCode ?? null,
         responseBody: input.responseBody ?? null,
         rawTraceJson: input.rawTraceJson ?? {},
+        lastRingbaAttemptAt: now,
+        ringbaFailureCount: 1,
+        nextRingbaRetryAt:
+          input.nextRingbaRetryAt === undefined ? null : (input.nextRingbaRetryAt ?? null),
         primaryFailureStage: "fetch_failed",
         primaryErrorMessage: input.errorMessage,
         outcome: "unknown",
@@ -738,13 +860,19 @@ export async function getInvestigationByBidId(bidId: string) {
     return left.createdAt.localeCompare(right.createdAt);
   });
   targetAttemptData.sort((left, right) => left.sequence - right.sequence);
-  const sourceRow =
-    investigation.importRunId
+  const sourceRow = investigation.sourceImportSourceRowId
+    ? await getImportSourceRowContextById(investigation.sourceImportSourceRowId)
+    : investigation.sourceImportRunId
       ? await getImportSourceRowContextForBidId({
-          importRunId: investigation.importRunId,
+          importRunId: investigation.sourceImportRunId,
           bidId: investigation.bidId,
         })
-      : null;
+      : investigation.importRunId
+        ? await getImportSourceRowContextForBidId({
+            importRunId: investigation.importRunId,
+            bidId: investigation.bidId,
+          })
+        : null;
   const sourceContext: InvestigationSourceContext | null = sourceRow
     ? {
         fileName: sourceRow.fileName,
@@ -757,6 +885,161 @@ export async function getInvestigationByBidId(bidId: string) {
     : null;
 
   return toDetail(investigation, eventData, targetAttemptData, sourceContext);
+}
+
+export interface HistoricalBackfillCandidate {
+  bidId: string;
+  bidDt: string | null;
+  campaignId: string | null;
+  publisherId: string | null;
+  sourceImportRunId: string | null;
+  enrichmentState: EnrichmentState;
+  nextRingbaRetryAt: string | null;
+}
+
+export async function listHistoricalBackfillCandidates(input: {
+  startBidDt?: string;
+  endBidDt?: string;
+  limit: number;
+  sort: "newest_first" | "oldest_first";
+  cursorBidDt?: string;
+  cursorBidId?: string;
+  campaignId?: string;
+  publisherId?: string;
+  sourceImportRunId?: string;
+}) {
+  const db = getDb();
+  const now = nowIso();
+  const filters = [
+    inArray(bidInvestigations.enrichmentState, ["csv_only", "failed", "not_found"]),
+    or(
+      isNull(bidInvestigations.nextRingbaRetryAt),
+      lte(bidInvestigations.nextRingbaRetryAt, now),
+    ),
+  ];
+
+  if (input.startBidDt) {
+    filters.push(gte(bidInvestigations.bidDt, input.startBidDt));
+  }
+
+  if (input.endBidDt) {
+    filters.push(lte(bidInvestigations.bidDt, input.endBidDt));
+  }
+
+  if (input.campaignId) {
+    filters.push(eq(bidInvestigations.campaignId, input.campaignId));
+  }
+
+  if (input.publisherId) {
+    filters.push(eq(bidInvestigations.publisherId, input.publisherId));
+  }
+
+  if (input.sourceImportRunId) {
+    filters.push(eq(bidInvestigations.sourceImportRunId, input.sourceImportRunId));
+  }
+
+  if (input.cursorBidDt && input.cursorBidId) {
+    if (input.sort === "oldest_first") {
+      filters.push(
+        or(
+          gt(bidInvestigations.bidDt, input.cursorBidDt),
+          and(
+            eq(bidInvestigations.bidDt, input.cursorBidDt),
+            gt(bidInvestigations.bidId, input.cursorBidId),
+          ),
+        ),
+      );
+    } else {
+      filters.push(
+        or(
+          lt(bidInvestigations.bidDt, input.cursorBidDt),
+          and(
+            eq(bidInvestigations.bidDt, input.cursorBidDt),
+            lt(bidInvestigations.bidId, input.cursorBidId),
+          ),
+        ),
+      );
+    }
+  }
+
+  const whereClause = and(...filters);
+  const orderDirection = input.sort === "oldest_first" ? asc : desc;
+  const rows = db
+    .select({
+      bidId: bidInvestigations.bidId,
+      bidDt: bidInvestigations.bidDt,
+      campaignId: bidInvestigations.campaignId,
+      publisherId: bidInvestigations.publisherId,
+      sourceImportRunId: bidInvestigations.sourceImportRunId,
+      enrichmentState: bidInvestigations.enrichmentState,
+      nextRingbaRetryAt: bidInvestigations.nextRingbaRetryAt,
+    })
+    .from(bidInvestigations)
+    .where(whereClause)
+    .orderBy(orderDirection(bidInvestigations.bidDt), orderDirection(bidInvestigations.bidId))
+    .limit(input.limit)
+    .all() as Array<{
+    bidId: string;
+    bidDt: string | null;
+    campaignId: string | null;
+    publisherId: string | null;
+    sourceImportRunId: string | null;
+    enrichmentState: string;
+    nextRingbaRetryAt: string | null;
+  }>;
+
+  return rows.map((row) => ({
+    ...row,
+    enrichmentState: row.enrichmentState as EnrichmentState,
+  })) satisfies HistoricalBackfillCandidate[];
+}
+
+export async function countHistoricalBackfillCandidates(input: {
+  startBidDt?: string;
+  endBidDt?: string;
+  campaignId?: string;
+  publisherId?: string;
+  sourceImportRunId?: string;
+}) {
+  const db = getDb();
+  const now = nowIso();
+  const filters = [
+    inArray(bidInvestigations.enrichmentState, ["csv_only", "failed", "not_found"]),
+    or(
+      isNull(bidInvestigations.nextRingbaRetryAt),
+      lte(bidInvestigations.nextRingbaRetryAt, now),
+    ),
+  ];
+
+  if (input.startBidDt) {
+    filters.push(gte(bidInvestigations.bidDt, input.startBidDt));
+  }
+
+  if (input.endBidDt) {
+    filters.push(lte(bidInvestigations.bidDt, input.endBidDt));
+  }
+
+  if (input.campaignId) {
+    filters.push(eq(bidInvestigations.campaignId, input.campaignId));
+  }
+
+  if (input.publisherId) {
+    filters.push(eq(bidInvestigations.publisherId, input.publisherId));
+  }
+
+  if (input.sourceImportRunId) {
+    filters.push(eq(bidInvestigations.sourceImportRunId, input.sourceImportRunId));
+  }
+
+  const row = db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(bidInvestigations)
+    .where(and(...filters))
+    .get() as { count: number } | undefined;
+
+  return row?.count ?? 0;
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {

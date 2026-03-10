@@ -4,19 +4,37 @@ export const createImportScheduleSchema = z.object({
   name: z.string().trim().min(1).max(100),
   isEnabled: z.boolean().optional().default(true),
   accountId: z.string().trim().min(1),
-  sourceType: z.literal("ringba_recent_import").optional().default("ringba_recent_import"),
+  sourceType: z
+    .union([z.literal("ringba_recent_import"), z.literal("historical_ringba_backfill")])
+    .optional()
+    .default("ringba_recent_import"),
   windowMinutes: z.union([z.literal(5), z.literal(15), z.literal(60)]),
   overlapMinutes: z.coerce.number().int().min(0).max(15).optional().default(2),
   maxConcurrentRuns: z.coerce.number().int().min(1).max(3).optional().default(1),
+  backfillStartBidDt: z.string().datetime().optional(),
+  backfillEndBidDt: z.string().datetime().optional(),
+  backfillLimit: z.coerce.number().int().min(1).max(250).optional(),
+  backfillSort: z
+    .union([z.literal("newest_first"), z.literal("oldest_first")])
+    .optional(),
+  pilotLabel: z.string().trim().max(120).optional(),
 });
 
 export const updateImportScheduleSchema = z
   .object({
     name: z.string().trim().min(1).max(100).optional(),
     isEnabled: z.boolean().optional(),
+    sourceType: z
+      .union([z.literal("ringba_recent_import"), z.literal("historical_ringba_backfill")])
+      .optional(),
     windowMinutes: z.union([z.literal(5), z.literal(15), z.literal(60)]).optional(),
     overlapMinutes: z.coerce.number().int().min(0).max(15).optional(),
     maxConcurrentRuns: z.coerce.number().int().min(1).max(3).optional(),
+    backfillStartBidDt: z.string().datetime().optional(),
+    backfillEndBidDt: z.string().datetime().optional(),
+    backfillLimit: z.coerce.number().int().min(1).max(250).optional(),
+    backfillSort: z.union([z.literal("newest_first"), z.literal("oldest_first")]).optional(),
+    pilotLabel: z.string().trim().max(120).optional(),
   })
   .refine((value) => Object.keys(value).length > 0, {
     message: "Provide at least one schedule field to update.",

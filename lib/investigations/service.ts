@@ -7,7 +7,7 @@ import {
   upsertInvestigation,
 } from "@/lib/db/investigations";
 import { diagnoseBid } from "@/lib/diagnostics/rules";
-import { fetchRingbaBidDetail } from "@/lib/ringba/client";
+import { fetchRingbaBidDetail, type RingbaFetchResult } from "@/lib/ringba/client";
 import { normalizeRingbaBidDetail } from "@/lib/ringba/normalize";
 
 interface InvestigateBidOptions {
@@ -15,11 +15,17 @@ interface InvestigateBidOptions {
   forceRefresh?: boolean;
   waitForPendingMs?: number;
   pollIntervalMs?: number;
+  sourceType?: string;
 }
 
 export interface InvestigationExecutionResult {
   investigation: Awaited<ReturnType<typeof getInvestigationByBidId>>;
   resolution: "fetched" | "reused" | "failed";
+  fetchTelemetry: {
+    latencyMs: number;
+    attemptCount: number;
+    errorKind: RingbaFetchResult["errorKind"];
+  } | null;
 }
 
 function delay(milliseconds: number) {
@@ -60,7 +66,7 @@ export async function investigateBid(
 
   if (!claim.shouldFetch) {
     const existing =
-      claim.fetchStatus === "pending"
+      claim.blockReason === "pending"
         ? await waitForSettledInvestigation(
             bidId,
             options.waitForPendingMs ?? 8000,
@@ -72,26 +78,49 @@ export async function investigateBid(
       throw new Error(`Unable to reuse stored investigation for bid ${bidId}.`);
     }
 
+    if (claim.blockReason === "retry_scheduled") {
+      return {
+        investigation: existing,
+        resolution: existing.fetchStatus === "failed" ? "failed" : "reused",
+        fetchTelemetry: null,
+      };
+    }
+
     return {
       investigation: existing,
       resolution: "reused",
+      fetchTelemetry: null,
     };
   }
 
   try {
-    const fetchResult = await fetchRingbaBidDetail(bidId);
+    const fetchResult = await fetchRingbaBidDetail(bidId, {
+      budgetProfile:
+        options.sourceType === "historical_ringba_backfill"
+          ? "historical_backfill"
+          : "default",
+    });
+    const nextRingbaRetryAt =
+      fetchResult.retryAfterMs !== null
+        ? new Date(Date.now() + fetchResult.retryAfterMs).toISOString()
+        : null;
 
-    if (fetchResult.transportError) {
+    if (fetchResult.transportError || !fetchResult.ok) {
       const failedInvestigation = await markInvestigationFetchFailed({
         bidId,
         importRunId: options.importRunId,
-        errorMessage: fetchResult.transportError,
+        errorMessage:
+          fetchResult.transportError ??
+          `Ringba bid detail request failed with HTTP ${fetchResult.httpStatusCode}.`,
         httpStatusCode: fetchResult.httpStatusCode,
         responseBody: fetchResult.rawBody,
         rawTraceJson: {
           requestUrl: fetchResult.requestUrl,
           fetchedAt: fetchResult.fetchedAt,
           httpStatusCode: fetchResult.httpStatusCode,
+          errorKind: fetchResult.errorKind,
+          latencyMs: fetchResult.latencyMs,
+          attemptCount: fetchResult.attemptCount,
           responseHeaders: fetchResult.responseHeaders,
           transportError: fetchResult.transportError,
           payload:
@@ -101,6 +130,13 @@ export async function investigateBid(
                 }
               : fetchResult.rawBody,
         },
+        enrichmentState: fetchResult.errorKind === "not_found" ? "not_found" : "failed",
+        nextRingbaRetryAt:
+          fetchResult.errorKind === "rate_limited" ||
+          fetchResult.errorKind === "server_error" ||
+          fetchResult.errorKind === "transport_error"
+            ? nextRingbaRetryAt
+            : null,
       });
 
       return {
@@ -110,6 +146,11 @@ export async function investigateBid(
             throw new Error(`Unable to persist failed investigation for ${bidId}.`);
           })(),
         resolution: "failed",
+        fetchTelemetry: {
+          latencyMs: fetchResult.latencyMs,
+          attemptCount: fetchResult.attemptCount,
+          errorKind: fetchResult.errorKind,
+        },
       };
     }
 
@@ -119,11 +160,24 @@ export async function investigateBid(
       importRunId: options.importRunId,
       normalizedBid,
       diagnosis,
+      persistence: {
+        detailSource: "ringba_api",
+        enrichmentState: "enriched",
+        lastRingbaAttemptAt: fetchResult.fetchedAt,
+        lastRingbaFetchAt: fetchResult.fetchedAt,
+        ringbaFailureCount: 0,
+        nextRingbaRetryAt: null,
+      },
     });
 
     return {
       investigation,
       resolution: "fetched",
+      fetchTelemetry: {
+        latencyMs: fetchResult.latencyMs,
+        attemptCount: fetchResult.attemptCount,
+        errorKind: fetchResult.errorKind,
+      },
     };
   } catch (error) {
     const message =
@@ -141,6 +195,7 @@ export async function investigateBid(
           throw new Error(`Unable to persist failed investigation for ${bidId}.`);
         })(),
       resolution: "failed",
+      fetchTelemetry: null,
     };
   }
 }

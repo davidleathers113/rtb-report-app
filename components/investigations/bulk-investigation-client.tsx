@@ -22,6 +22,7 @@ import { toSentenceCase } from "@/lib/utils";
 import type { InvestigationListItem } from "@/types/bid";
 import type {
   CsvDirectPreviewResult,
+  HistoricalBackfillSourceMetadata,
   CsvPreviewResult,
   ImportRunDetail,
   RingbaRecentImportDiagnostics,
@@ -104,6 +105,28 @@ function getRingbaDiagnostics(sourceMetadata: Record<string, unknown>) {
   }
 
   return {};
+}
+
+function getHistoricalBackfillMetrics(sourceMetadata: Record<string, unknown>) {
+  const metrics =
+    (sourceMetadata as HistoricalBackfillSourceMetadata).metrics &&
+    typeof (sourceMetadata as HistoricalBackfillSourceMetadata).metrics === "object"
+      ? ((sourceMetadata as HistoricalBackfillSourceMetadata).metrics as Record<string, unknown>)
+      : {};
+
+  return {
+    attemptedCount: typeof metrics.attemptedCount === "number" ? metrics.attemptedCount : 0,
+    enrichedCount: typeof metrics.enrichedCount === "number" ? metrics.enrichedCount : 0,
+    reusedCount: typeof metrics.reusedCount === "number" ? metrics.reusedCount : 0,
+    notFoundCount: typeof metrics.notFoundCount === "number" ? metrics.notFoundCount : 0,
+    failedCount: typeof metrics.failedCount === "number" ? metrics.failedCount : 0,
+    rateLimitedCount:
+      typeof metrics.rateLimitedCount === "number" ? metrics.rateLimitedCount : 0,
+    serverErrorCount:
+      typeof metrics.serverErrorCount === "number" ? metrics.serverErrorCount : 0,
+    averageFetchLatencyMs:
+      typeof metrics.averageFetchLatencyMs === "number" ? metrics.averageFetchLatencyMs : null,
+  };
 }
 
 function formatTimestamp(value: string | null) {
@@ -213,6 +236,7 @@ export function BulkInvestigationClient({
   const [isSubmittingDirectCsv, setIsSubmittingDirectCsv] = useState(false);
   const [isPreviewingDirectCsv, setIsPreviewingDirectCsv] = useState(false);
   const [isSubmittingRecentImport, setIsSubmittingRecentImport] = useState(false);
+  const [isSubmittingHistoricalBackfill, setIsSubmittingHistoricalBackfill] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<ImportRunDetail | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -235,6 +259,13 @@ export function BulkInvestigationClient({
   const [expandedSourceRows, setExpandedSourceRows] = useState<Record<string, boolean>>({});
   const sourceRowsLimit = 50;
   const [recentWindowMinutes, setRecentWindowMinutes] = useState<5 | 15 | 60>(15);
+  const [historicalBackfillStart, setHistoricalBackfillStart] = useState("");
+  const [historicalBackfillEnd, setHistoricalBackfillEnd] = useState("");
+  const [historicalBackfillLimit, setHistoricalBackfillLimit] = useState(10);
+  const [historicalBackfillSort, setHistoricalBackfillSort] = useState<
+    "newest_first" | "oldest_first"
+  >("newest_first");
+  const [historicalPilotLabel, setHistoricalPilotLabel] = useState("");
   const [schedules, setSchedules] = useState<ImportScheduleDetail[]>(initialSchedules);
   const [isRefreshingSchedules, setIsRefreshingSchedules] = useState(false);
   const [isSubmittingSchedule, setIsSubmittingSchedule] = useState(false);
@@ -243,8 +274,17 @@ export function BulkInvestigationClient({
   const [scheduleAccountId, setScheduleAccountId] = useState(
     initialSchedules[0]?.accountId ?? "",
   );
+  const [scheduleSourceType, setScheduleSourceType] = useState<
+    "ringba_recent_import" | "historical_ringba_backfill"
+  >("ringba_recent_import");
   const [scheduleWindowMinutes, setScheduleWindowMinutes] = useState<5 | 15 | 60>(15);
   const [scheduleOverlapMinutes, setScheduleOverlapMinutes] = useState(2);
+  const [scheduleBackfillStart, setScheduleBackfillStart] = useState("");
+  const [scheduleBackfillEnd, setScheduleBackfillEnd] = useState("");
+  const [scheduleBackfillLimit, setScheduleBackfillLimit] = useState(10);
+  const [scheduleBackfillSort, setScheduleBackfillSort] = useState<
+    "newest_first" | "oldest_first"
+  >("newest_first");
   const [scheduleDrafts, setScheduleDrafts] = useState(buildScheduleDrafts(initialSchedules));
   const [scheduleHealthFilter, setScheduleHealthFilter] = useState<
     "all" | "unhealthy" | "healthy" | "enabled" | "disabled"
@@ -322,10 +362,23 @@ export function BulkInvestigationClient({
   const isTerminal = activeRun ? terminalStatuses.has(activeRun.status) : false;
   const activeRunId = activeRun?.id ?? null;
   const isRingbaRecentRun = activeRun?.sourceType === "ringba_recent_import";
+  const isHistoricalBackfillRun = activeRun?.sourceType === "historical_ringba_backfill";
   const currentSourceStage = activeRun?.sourceStage ?? "queued";
   const ringbaDiagnostics = activeRun
     ? getRingbaDiagnostics(activeRun.sourceMetadata)
     : {};
+  const historicalBackfillMetrics = activeRun
+    ? getHistoricalBackfillMetrics(activeRun.sourceMetadata)
+    : {
+        attemptedCount: 0,
+        enrichedCount: 0,
+        reusedCount: 0,
+        notFoundCount: 0,
+        failedCount: 0,
+        rateLimitedCount: 0,
+        serverErrorCount: 0,
+        averageFetchLatencyMs: null,
+      };
   const currentSourceStageIndex = ringbaRecentImportStages.findIndex((stage) => {
     return stage === currentSourceStage;
   });
@@ -786,6 +839,50 @@ export function BulkInvestigationClient({
     }
   }
 
+  async function handleSubmitHistoricalBackfill() {
+    setIsSubmittingHistoricalBackfill(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/import-runs/historical-backfill", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          startBidDt: historicalBackfillStart
+            ? new Date(historicalBackfillStart).toISOString()
+            : undefined,
+          endBidDt: historicalBackfillEnd
+            ? new Date(historicalBackfillEnd).toISOString()
+            : undefined,
+          limit: historicalBackfillLimit,
+          sort: historicalBackfillSort,
+          forceRefresh,
+          pilotLabel: historicalPilotLabel || undefined,
+        }),
+      });
+      const payload = (await response.json()) as
+        | ImportRunDetail
+        | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(
+          errorPayload.error ?? "Unable to create historical Ringba backfill run.",
+        );
+      }
+
+      setActiveRun(payload as ImportRunDetail);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected historical backfill error.",
+      );
+    } finally {
+      setIsSubmittingHistoricalBackfill(false);
+    }
+  }
+
   async function handleCreateSchedule() {
     setIsSubmittingSchedule(true);
     setErrorMessage(null);
@@ -800,10 +897,26 @@ export function BulkInvestigationClient({
           name: scheduleName,
           isEnabled: true,
           accountId: scheduleAccountId,
-          sourceType: "ringba_recent_import",
+          sourceType: scheduleSourceType,
           windowMinutes: scheduleWindowMinutes,
           overlapMinutes: scheduleOverlapMinutes,
           maxConcurrentRuns: 1,
+          backfillStartBidDt:
+            scheduleSourceType === "historical_ringba_backfill" && scheduleBackfillStart
+              ? new Date(scheduleBackfillStart).toISOString()
+              : undefined,
+          backfillEndBidDt:
+            scheduleSourceType === "historical_ringba_backfill" && scheduleBackfillEnd
+              ? new Date(scheduleBackfillEnd).toISOString()
+              : undefined,
+          backfillLimit:
+            scheduleSourceType === "historical_ringba_backfill"
+              ? scheduleBackfillLimit
+              : undefined,
+          backfillSort:
+            scheduleSourceType === "historical_ringba_backfill"
+              ? scheduleBackfillSort
+              : undefined,
         }),
       });
       const payload = (await response.json()) as
@@ -817,8 +930,13 @@ export function BulkInvestigationClient({
 
       setScheduleName("");
       setScheduleAccountId(scheduleAccountId);
+      setScheduleSourceType("ringba_recent_import");
       setScheduleWindowMinutes(15);
       setScheduleOverlapMinutes(2);
+      setScheduleBackfillStart("");
+      setScheduleBackfillEnd("");
+      setScheduleBackfillLimit(10);
+      setScheduleBackfillSort("newest_first");
       await refreshSchedules();
     } catch (error) {
       setErrorMessage(
@@ -1217,6 +1335,11 @@ export function BulkInvestigationClient({
                   setSelectedCsvColumnKey("");
                   setIsDirectCsvMode(false);
                   setRecentWindowMinutes(15);
+                  setHistoricalBackfillStart("");
+                  setHistoricalBackfillEnd("");
+                  setHistoricalBackfillLimit(10);
+                  setHistoricalBackfillSort("newest_first");
+                  setHistoricalPilotLabel("");
                   setErrorMessage(null);
                 }}
               >
@@ -1507,6 +1630,65 @@ export function BulkInvestigationClient({
             </div>
           </div>
           <div className="rounded-lg border border-slate-200 p-4">
+            <div className="space-y-2">
+              <p className="text-sm font-semibold text-slate-900">
+                Historical Ringba backfill pilot
+              </p>
+              <p className="text-sm text-slate-500">
+                Select already-imported CSV-only bids from SQLite, then trickle Ringba
+                detail fetches through the existing async import pipeline.
+              </p>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+              <Input
+                type="datetime-local"
+                value={historicalBackfillStart}
+                onChange={(event) => setHistoricalBackfillStart(event.target.value)}
+              />
+              <Input
+                type="datetime-local"
+                value={historicalBackfillEnd}
+                onChange={(event) => setHistoricalBackfillEnd(event.target.value)}
+              />
+              <Input
+                type="number"
+                min={1}
+                max={250}
+                value={historicalBackfillLimit}
+                onChange={(event) =>
+                  setHistoricalBackfillLimit(Math.max(1, Number(event.target.value) || 1))
+                }
+              />
+              <select
+                value={historicalBackfillSort}
+                onChange={(event) =>
+                  setHistoricalBackfillSort(
+                    event.target.value as "newest_first" | "oldest_first",
+                  )
+                }
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+              >
+                <option value="newest_first">Newest first</option>
+                <option value="oldest_first">Oldest first</option>
+              </select>
+              <Input
+                value={historicalPilotLabel}
+                onChange={(event) => setHistoricalPilotLabel(event.target.value)}
+                placeholder="Pilot label"
+              />
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button
+                onClick={handleSubmitHistoricalBackfill}
+                disabled={isSubmittingHistoricalBackfill}
+              >
+                {isSubmittingHistoricalBackfill
+                  ? "Creating Historical Backfill..."
+                  : "Create Historical Backfill Pilot"}
+              </Button>
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-200 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="space-y-2">
                 <p className="text-sm font-semibold text-slate-900">
@@ -1536,7 +1718,7 @@ export function BulkInvestigationClient({
                 `x-import-schedules-trigger-secret`.
               </div>
             ) : null}
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-6">
               <input
                 value={scheduleName}
                 onChange={(event) => setScheduleName(event.target.value)}
@@ -1549,6 +1731,20 @@ export function BulkInvestigationClient({
                 placeholder="Ringba account id"
                 className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
               />
+              <select
+                value={scheduleSourceType}
+                onChange={(event) =>
+                  setScheduleSourceType(
+                    event.target.value as
+                      | "ringba_recent_import"
+                      | "historical_ringba_backfill",
+                  )
+                }
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+              >
+                <option value="ringba_recent_import">Recent import</option>
+                <option value="historical_ringba_backfill">Historical backfill</option>
+              </select>
               <select
                 value={scheduleWindowMinutes}
                 onChange={(event) =>
@@ -1574,6 +1770,41 @@ export function BulkInvestigationClient({
                 {isSubmittingSchedule ? "Creating Schedule..." : "Create Schedule"}
               </Button>
             </div>
+            {scheduleSourceType === "historical_ringba_backfill" ? (
+              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <Input
+                  type="datetime-local"
+                  value={scheduleBackfillStart}
+                  onChange={(event) => setScheduleBackfillStart(event.target.value)}
+                />
+                <Input
+                  type="datetime-local"
+                  value={scheduleBackfillEnd}
+                  onChange={(event) => setScheduleBackfillEnd(event.target.value)}
+                />
+                <Input
+                  type="number"
+                  min={1}
+                  max={250}
+                  value={scheduleBackfillLimit}
+                  onChange={(event) =>
+                    setScheduleBackfillLimit(Math.max(1, Number(event.target.value) || 1))
+                  }
+                />
+                <select
+                  value={scheduleBackfillSort}
+                  onChange={(event) =>
+                    setScheduleBackfillSort(
+                      event.target.value as "newest_first" | "oldest_first",
+                    )
+                  }
+                  className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                >
+                  <option value="newest_first">Newest first</option>
+                  <option value="oldest_first">Oldest first</option>
+                </select>
+              </div>
+            ) : null}
             <div className="mt-4 space-y-3">
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
                 <div className="rounded-lg bg-slate-50 p-3 text-sm">
@@ -1696,6 +1927,7 @@ export function BulkInvestigationClient({
                             <Badge variant={schedule.isEnabled ? "default" : "info"}>
                               {schedule.isEnabled ? "Enabled" : "Disabled"}
                             </Badge>
+                            <Badge variant="info">{schedule.sourceType}</Badge>
                             <Badge variant={getScheduleHealthBadgeVariant(schedule.healthStatus)}>
                               {schedule.healthStatus}
                             </Badge>
@@ -2389,7 +2621,10 @@ export function BulkInvestigationClient({
       {activeRun ? (
         <Card>
           <CardHeader>
-            <CardTitle>Import Run Progress</CardTitle>
+            <div className="flex flex-wrap items-center gap-2">
+              <CardTitle>Import Run Progress</CardTitle>
+              <Badge variant="info">{activeRun.sourceType}</Badge>
+            </div>
             <CardDescription>
               Import run `{activeRun.id}` is {activeRun.status}. {activeRun.completedCount}{" "}
               completed, {activeRun.failedCount} failed, {activeRun.reusedCount} reused,
@@ -2574,6 +2809,91 @@ export function BulkInvestigationClient({
                     {ringbaDiagnostics.sourceStageError}
                   </div>
                 ) : null}
+              </div>
+            ) : null}
+
+            {isHistoricalBackfillRun ? (
+              <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      Historical backfill diagnostics
+                    </h3>
+                    <p className="text-sm text-slate-500">
+                      CSV-only candidates selected from SQLite and processed through the
+                      Ringba detail fetch path.
+                    </p>
+                  </div>
+                  <Badge variant={isTerminal ? "default" : "warning"}>
+                    {activeRun.sourceStage}
+                  </Badge>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Window Start</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {activeRun.sourceWindowStart ?? "Not set"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Window End</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {activeRun.sourceWindowEnd ?? "Not set"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Attempted</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.attemptedCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Avg Fetch Latency</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.averageFetchLatencyMs === null
+                        ? "Pending"
+                        : `${historicalBackfillMetrics.averageFetchLatencyMs} ms`}
+                    </p>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Enriched</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.enrichedCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Reused</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.reusedCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Not Found</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.notFoundCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Failed</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.failedCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">429s</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.rateLimitedCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">5xx</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {historicalBackfillMetrics.serverErrorCount}
+                    </p>
+                  </div>
+                </div>
               </div>
             ) : null}
 

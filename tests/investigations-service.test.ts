@@ -76,10 +76,16 @@ function buildInvestigation(
     suggestedFix: "Review manually.",
     explanation: "Stored investigation.",
     evidence: [],
+    detailSource: "ringba_api",
+    enrichmentState: "enriched",
     fetchStatus: "fetched",
     fetchedAt: "2026-03-09T00:01:00.000Z",
     fetchStartedAt: "2026-03-09T00:00:30.000Z",
     lastError: null,
+    lastRingbaAttemptAt: "2026-03-09T00:00:30.000Z",
+    lastRingbaFetchAt: "2026-03-09T00:01:00.000Z",
+    ringbaFailureCount: 0,
+    nextRingbaRetryAt: null,
     refreshRequestedAt: null,
     leaseExpiresAt: null,
     fetchAttemptCount: 1,
@@ -100,7 +106,9 @@ describe("investigateBid", () => {
       id: "investigation-1",
       bidId: "bid-1",
       fetchStatus: "fetched",
+      enrichmentState: "enriched",
       shouldFetch: false,
+      blockReason: "reused",
       fetchedAt: "2026-03-09T00:01:00.000Z",
       lastError: null,
       fetchAttemptCount: 1,
@@ -114,6 +122,7 @@ describe("investigateBid", () => {
     });
 
     expect(result.resolution).toBe("reused");
+    expect(result.fetchTelemetry).toBeNull();
     expect(fetchRingbaBidDetail).not.toHaveBeenCalled();
     expect(result.investigation?.bidId).toBe("bid-1");
   });
@@ -123,7 +132,9 @@ describe("investigateBid", () => {
       id: "investigation-1",
       bidId: "bid-1",
       fetchStatus: "pending",
+      enrichmentState: "fetching",
       shouldFetch: true,
+      blockReason: null,
       fetchedAt: null,
       lastError: null,
       fetchAttemptCount: 1,
@@ -138,6 +149,10 @@ describe("investigateBid", () => {
       rawBody: { bidId: "bid-1" },
       responseHeaders: {},
       transportError: null,
+      errorKind: "none",
+      latencyMs: 120,
+      attemptCount: 1,
+      retryAfterMs: null,
     });
     vi.mocked(normalizeRingbaBidDetail).mockReturnValue({
       bidId: "bid-1",
@@ -188,8 +203,15 @@ describe("investigateBid", () => {
     });
 
     expect(result.resolution).toBe("fetched");
-    expect(fetchRingbaBidDetail).toHaveBeenCalledWith("bid-1");
+    expect(fetchRingbaBidDetail).toHaveBeenCalledWith("bid-1", {
+      budgetProfile: "default",
+    });
     expect(upsertInvestigation).toHaveBeenCalled();
+    expect(result.fetchTelemetry).toEqual({
+      latencyMs: 120,
+      attemptCount: 1,
+      errorKind: "none",
+    });
   });
 
   it("persists a failed state when the upstream fetch has a transport error", async () => {
@@ -197,7 +219,9 @@ describe("investigateBid", () => {
       id: "investigation-1",
       bidId: "bid-1",
       fetchStatus: "pending",
+      enrichmentState: "fetching",
       shouldFetch: true,
+      blockReason: null,
       fetchedAt: null,
       lastError: null,
       fetchAttemptCount: 1,
@@ -214,6 +238,10 @@ describe("investigateBid", () => {
       },
       responseHeaders: {},
       transportError: "network timeout",
+      errorKind: "transport_error",
+      latencyMs: 1000,
+      attemptCount: 1,
+      retryAfterMs: 1000,
     });
     vi.mocked(markInvestigationFetchFailed).mockResolvedValue(
       buildInvestigation({
@@ -229,6 +257,11 @@ describe("investigateBid", () => {
 
     expect(result.resolution).toBe("failed");
     expect(markInvestigationFetchFailed).toHaveBeenCalled();
+    expect(result.fetchTelemetry).toEqual({
+      latencyMs: 1000,
+      attemptCount: 1,
+      errorKind: "transport_error",
+    });
     expect(result.investigation?.fetchStatus).toBe("failed");
   });
 });

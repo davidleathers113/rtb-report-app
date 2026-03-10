@@ -1,7 +1,10 @@
 import type { ImportRunSourceStage, ImportRunStatus } from "@/types/import-run";
 import type { ImportOpsEvent, ImportOpsEventPage } from "@/types/ops-event";
 
-export const IMPORT_SCHEDULE_SOURCE_TYPES = ["ringba_recent_import"] as const;
+export const IMPORT_SCHEDULE_SOURCE_TYPES = [
+  "ringba_recent_import",
+  "historical_ringba_backfill",
+] as const;
 
 export type ImportScheduleSourceType = (typeof IMPORT_SCHEDULE_SOURCE_TYPES)[number];
 
@@ -86,6 +89,7 @@ export interface ImportScheduleDetail {
   windowMinutes: 5 | 15 | 60;
   overlapMinutes: number;
   maxConcurrentRuns: number;
+  sourceMetadata: Record<string, unknown>;
   lastTriggeredAt: string | null;
   lastSucceededAt: string | null;
   lastFailedAt: string | null;

@@ -40,6 +40,7 @@ interface ImportScheduleRow {
   window_minutes: 5 | 15 | 60;
   overlap_minutes: number;
   max_concurrent_runs: number;
+  source_metadata: Record<string, unknown> | null;
   last_triggered_at: string | null;
   last_succeeded_at: string | null;
   last_failed_at: string | null;
@@ -117,6 +118,7 @@ function mapScheduleDbRow(row: DbImportScheduleRow): ImportScheduleRow {
     window_minutes: row.windowMinutes as 5 | 15 | 60,
     overlap_minutes: row.overlapMinutes,
     max_concurrent_runs: row.maxConcurrentRuns,
+    source_metadata: (row.sourceMetadata ?? null) as Record<string, unknown> | null,
     last_triggered_at: row.lastTriggeredAt,
     last_succeeded_at: row.lastSucceededAt,
     last_failed_at: row.lastFailedAt,
@@ -179,6 +181,7 @@ function mapSchedule(row: ImportScheduleRow) {
     windowMinutes: row.window_minutes,
     overlapMinutes: row.overlap_minutes,
     maxConcurrentRuns: row.max_concurrent_runs,
+    sourceMetadata: row.source_metadata ?? {},
     lastTriggeredAt: row.last_triggered_at,
     lastSucceededAt: row.last_succeeded_at,
     lastFailedAt: row.last_failed_at,
@@ -865,6 +868,7 @@ export async function createImportSchedule(input: {
   windowMinutes: 5 | 15 | 60;
   overlapMinutes: number;
   maxConcurrentRuns: number;
+  sourceMetadata?: Record<string, unknown>;
 }) {
   const db = getDb();
   const now = nowIso();
@@ -877,6 +881,7 @@ export async function createImportSchedule(input: {
     window_minutes: input.windowMinutes,
     overlap_minutes: input.overlapMinutes,
     max_concurrent_runs: input.maxConcurrentRuns,
+    source_metadata: input.sourceMetadata ?? {},
     last_triggered_at: null,
     last_succeeded_at: null,
     last_failed_at: null,
@@ -904,6 +909,7 @@ export async function createImportSchedule(input: {
       windowMinutes: row.window_minutes,
       overlapMinutes: row.overlap_minutes,
       maxConcurrentRuns: row.max_concurrent_runs,
+      sourceMetadata: row.source_metadata ?? {},
       alertState: row.alert_state ?? {},
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -942,9 +948,11 @@ export async function updateImportSchedule(input: {
   scheduleId: string;
   name?: string;
   isEnabled?: boolean;
+  sourceType?: ImportScheduleSourceType;
   windowMinutes?: 5 | 15 | 60;
   overlapMinutes?: number;
   maxConcurrentRuns?: number;
+  sourceMetadata?: Record<string, unknown>;
 }) {
   const db = getDb();
   const now = nowIso();
@@ -956,6 +964,9 @@ export async function updateImportSchedule(input: {
   if (input.isEnabled !== undefined) {
     updateData.isEnabled = input.isEnabled;
   }
+  if (input.sourceType !== undefined) {
+    updateData.sourceType = input.sourceType;
+  }
   if (input.windowMinutes !== undefined) {
     updateData.windowMinutes = input.windowMinutes;
   }
@@ -964,6 +975,9 @@ export async function updateImportSchedule(input: {
   }
   if (input.maxConcurrentRuns !== undefined) {
     updateData.maxConcurrentRuns = input.maxConcurrentRuns;
+  }
+  if (input.sourceMetadata !== undefined) {
+    updateData.sourceMetadata = input.sourceMetadata;
   }
   updateData.updatedAt = now;
 
@@ -1080,6 +1094,7 @@ export async function claimDueImportSchedules(input?: {
       windowMinutes: row.window_minutes,
       overlapMinutes: row.overlap_minutes,
       maxConcurrentRuns: row.max_concurrent_runs,
+      sourceMetadata: row.source_metadata ?? {},
       lastTriggeredAt: row.last_triggered_at,
       lastSucceededAt: row.last_succeeded_at,
       lastFailedAt: row.last_failed_at,

@@ -239,6 +239,10 @@ describe("normalizeRingbaBidDetail", () => {
       rawBody: buildAcceptedPayload(),
       responseHeaders: {},
       transportError: null,
+      errorKind: "none",
+      latencyMs: 100,
+      attemptCount: 1,
+      retryAfterMs: null,
     });
 
     expect(normalized.bidDt).toBe("2026-03-10T05:14:32.218Z");
@@ -256,6 +260,9 @@ describe("normalizeRingbaBidDetail", () => {
       CID: "16787878433",
       zipCode: "30340",
     });
+    expect(normalized.rawTraceJson.latencyMs).toBe(100);
+    expect(normalized.rawTraceJson.attemptCount).toBe(1);
+    expect(normalized.rawTraceJson.errorKind).toBe("none");
   });
 
   it("promotes the most actionable rejected target for zero-bid summaries", () => {
@@ -268,6 +275,10 @@ describe("normalizeRingbaBidDetail", () => {
       rawBody: buildZeroBidPayload(),
       responseHeaders: {},
       transportError: null,
+      errorKind: "none",
+      latencyMs: 100,
+      attemptCount: 1,
+      retryAfterMs: null,
     });
 
     expect(normalized.outcome).toBe("zero_bid");

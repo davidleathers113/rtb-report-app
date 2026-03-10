@@ -34,6 +34,7 @@ import {
   getImportRunBidIds,
   getImportRunDetail,
   resetFailedImportRunItems,
+  updateImportRunSourceState,
 } from "@/lib/db/import-runs";
 import {
   createAsyncImportRun,
@@ -74,6 +75,22 @@ function buildRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
     failedCount: 0,
     percentComplete: 0,
     items: [],
+    ...overrides,
+  };
+}
+
+function buildHistoricalMetrics(overrides: Record<string, number | null> = {}) {
+  return {
+    attemptedCount: 0,
+    enrichedCount: 0,
+    reusedCount: 0,
+    notFoundCount: 0,
+    failedCount: 0,
+    rateLimitedCount: 0,
+    serverErrorCount: 0,
+    averageFetchLatencyMs: null,
+    latencySampleCount: 0,
+    totalFetchLatencyMs: 0,
     ...overrides,
   };
 }
@@ -146,6 +163,244 @@ describe("import runs service", () => {
       resolution: "reused",
     });
     expect(result?.status).toBe("completed");
+  });
+
+  it("aggregates current-run latency for historical fetched items", async () => {
+    vi.mocked(claimImportRunProcessing).mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+      shouldProcess: true,
+      forceRefresh: false,
+      totalItems: 1,
+      totalProcessed: 0,
+      lastError: null,
+    });
+    vi.mocked(claimImportRunItems).mockResolvedValue([
+      { id: "item-1", bidId: "bid-1", position: 1 },
+    ]);
+    vi.mocked(getImportRunDetail).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics(),
+        },
+      }),
+    );
+    vi.mocked(investigateBid).mockResolvedValue({
+      resolution: "fetched",
+      fetchTelemetry: {
+        latencyMs: 120,
+        attemptCount: 1,
+        errorKind: "none",
+      },
+      investigation: {
+        id: "investigation-1",
+        bidId: "bid-1",
+        fetchStatus: "fetched",
+        enrichmentState: "enriched",
+        rawTraceJson: {},
+      },
+    } as unknown as Awaited<ReturnType<typeof investigateBid>>);
+    vi.mocked(updateImportRunSourceState).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics({
+            attemptedCount: 1,
+            enrichedCount: 1,
+            averageFetchLatencyMs: 120,
+            latencySampleCount: 1,
+            totalFetchLatencyMs: 120,
+          }),
+        },
+      }),
+    );
+    vi.mocked(finalizeImportRun).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        status: "completed",
+        completedCount: 1,
+        fetchedCount: 1,
+        queuedCount: 0,
+        percentComplete: 100,
+      }),
+    );
+
+    await processImportRun({
+      importRunId: "run-1",
+      batchSize: 10,
+      maxBatches: 1,
+    });
+
+    expect(updateImportRunSourceState).toHaveBeenCalledWith({
+      importRunId: "run-1",
+      sourceMetadata: {
+        metrics: buildHistoricalMetrics({
+          attemptedCount: 1,
+          enrichedCount: 1,
+          averageFetchLatencyMs: 120,
+          latencySampleCount: 1,
+          totalFetchLatencyMs: 120,
+        }),
+      },
+    });
+  });
+
+  it("does not count stale persisted latency for reused historical items", async () => {
+    vi.mocked(claimImportRunProcessing).mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+      shouldProcess: true,
+      forceRefresh: false,
+      totalItems: 1,
+      totalProcessed: 0,
+      lastError: null,
+    });
+    vi.mocked(claimImportRunItems).mockResolvedValue([
+      { id: "item-1", bidId: "bid-1", position: 1 },
+    ]);
+    vi.mocked(getImportRunDetail).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics(),
+        },
+      }),
+    );
+    vi.mocked(investigateBid).mockResolvedValue({
+      resolution: "reused",
+      fetchTelemetry: null,
+      investigation: {
+        id: "investigation-1",
+        bidId: "bid-1",
+        fetchStatus: "fetched",
+        enrichmentState: "enriched",
+        rawTraceJson: {
+          latencyMs: 999,
+          errorKind: "none",
+        },
+      },
+    } as unknown as Awaited<ReturnType<typeof investigateBid>>);
+    vi.mocked(updateImportRunSourceState).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics({
+            attemptedCount: 1,
+            reusedCount: 1,
+          }),
+        },
+      }),
+    );
+    vi.mocked(finalizeImportRun).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        status: "completed",
+        completedCount: 1,
+        reusedCount: 1,
+        queuedCount: 0,
+        percentComplete: 100,
+      }),
+    );
+
+    await processImportRun({
+      importRunId: "run-1",
+      batchSize: 10,
+      maxBatches: 1,
+    });
+
+    expect(updateImportRunSourceState).toHaveBeenCalledWith({
+      importRunId: "run-1",
+      sourceMetadata: {
+        metrics: buildHistoricalMetrics({
+          attemptedCount: 1,
+          reusedCount: 1,
+        }),
+      },
+    });
+  });
+
+  it("records rate-limited historical failures alongside latency", async () => {
+    vi.mocked(claimImportRunProcessing).mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+      shouldProcess: true,
+      forceRefresh: false,
+      totalItems: 1,
+      totalProcessed: 0,
+      lastError: null,
+    });
+    vi.mocked(claimImportRunItems).mockResolvedValue([
+      { id: "item-1", bidId: "bid-1", position: 1 },
+    ]);
+    vi.mocked(getImportRunDetail).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics(),
+        },
+      }),
+    );
+    vi.mocked(investigateBid).mockResolvedValue({
+      resolution: "failed",
+      fetchTelemetry: {
+        latencyMs: 250,
+        attemptCount: 2,
+        errorKind: "rate_limited",
+      },
+      investigation: {
+        id: "investigation-1",
+        bidId: "bid-1",
+        fetchStatus: "failed",
+        enrichmentState: "failed",
+        lastError: "429 from Ringba",
+        rawTraceJson: {},
+      },
+    } as unknown as Awaited<ReturnType<typeof investigateBid>>);
+    vi.mocked(updateImportRunSourceState).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          metrics: buildHistoricalMetrics({
+            attemptedCount: 1,
+            failedCount: 1,
+            rateLimitedCount: 1,
+            averageFetchLatencyMs: 250,
+            latencySampleCount: 1,
+            totalFetchLatencyMs: 250,
+          }),
+        },
+      }),
+    );
+    vi.mocked(finalizeImportRun).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        status: "completed_with_errors",
+        failedCount: 1,
+        queuedCount: 0,
+        percentComplete: 100,
+      }),
+    );
+
+    await processImportRun({
+      importRunId: "run-1",
+      batchSize: 10,
+      maxBatches: 1,
+    });
+
+    expect(updateImportRunSourceState).toHaveBeenCalledWith({
+      importRunId: "run-1",
+      sourceMetadata: {
+        metrics: buildHistoricalMetrics({
+          attemptedCount: 1,
+          failedCount: 1,
+          rateLimitedCount: 1,
+          averageFetchLatencyMs: 250,
+          latencySampleCount: 1,
+          totalFetchLatencyMs: 250,
+        }),
+      },
+    });
   });
 
   it("retries and reruns through the import run helpers", async () => {

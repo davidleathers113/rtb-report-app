@@ -25,6 +25,7 @@ vi.mock("@/lib/import-runs/ringba-recent", () => ({
 }));
 
 vi.mock("@/lib/import-runs/service", () => ({
+  createHistoricalRingbaBackfillRun: vi.fn(),
   processImportRun: vi.fn(),
   rerunImportRun: vi.fn(),
   retryFailedImportRunItems: vi.fn(),
@@ -116,6 +117,7 @@ describe("import schedules service", () => {
         windowMinutes: 15,
         overlapMinutes: 2,
         maxConcurrentRuns: 1,
+        sourceMetadata: {},
         lastTriggeredAt: null,
         lastSucceededAt: null,
         lastFailedAt: null,
@@ -207,6 +209,7 @@ describe("import schedules service", () => {
       windowMinutes: 15,
       overlapMinutes: 2,
       maxConcurrentRuns: 1,
+      sourceMetadata: {},
       lastTriggeredAt: null,
       lastSucceededAt: null,
       lastFailedAt: null,
@@ -269,6 +272,7 @@ describe("import schedules service", () => {
       windowMinutes: 15,
       overlapMinutes: 2,
       maxConcurrentRuns: 1,
+      sourceMetadata: {},
       lastTriggeredAt: null,
       lastSucceededAt: null,
       lastFailedAt: null,

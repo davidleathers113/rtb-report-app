@@ -38,6 +38,7 @@ function buildSchedule(
     windowMinutes: 15,
     overlapMinutes: 2,
     maxConcurrentRuns: 1,
+    sourceMetadata: {},
     lastTriggeredAt: "2026-03-10T00:00:00.000Z",
     lastSucceededAt: "2026-03-10T00:00:00.000Z",
     lastFailedAt: null,

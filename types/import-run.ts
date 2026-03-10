@@ -1,5 +1,14 @@
 import type { InvestigationListItem } from "@/types/bid";
 
+export const IMPORT_RUN_SOURCE_TYPES = [
+  "manual_bulk",
+  "csv_upload",
+  "csv_direct_import",
+  "ringba_recent_import",
+  "historical_ringba_backfill",
+  "import_run_rerun",
+] as const;
+
 export const IMPORT_RUN_STATUSES = [
   "queued",
   "running",
@@ -47,9 +56,57 @@ export const IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES = [
 export type ImportRunStatus = (typeof IMPORT_RUN_STATUSES)[number];
 export type ImportRunItemStatus = (typeof IMPORT_RUN_ITEM_STATUSES)[number];
 export type ImportRunItemResolution = (typeof IMPORT_RUN_ITEM_RESOLUTIONS)[number];
+export type ImportRunSourceType = (typeof IMPORT_RUN_SOURCE_TYPES)[number];
 export type ImportRunSourceStage = (typeof IMPORT_RUN_SOURCE_STAGES)[number];
 export type ImportRunExportDownloadStatus =
   (typeof IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES)[number];
+
+export interface HistoricalBackfillMetrics extends Record<string, unknown> {
+  attemptedCount: number;
+  enrichedCount: number;
+  reusedCount: number;
+  notFoundCount: number;
+  failedCount: number;
+  rateLimitedCount: number;
+  serverErrorCount: number;
+  averageFetchLatencyMs: number | null;
+  latencySampleCount: number;
+  totalFetchLatencyMs: number;
+}
+
+export interface HistoricalBackfillCandidateSummary extends Record<string, unknown> {
+  bidId: string;
+  bidDt: string | null;
+  campaignId: string | null;
+  publisherId: string | null;
+  sourceImportRunId: string | null;
+  enrichmentState: string;
+  nextRingbaRetryAt: string | null;
+}
+
+export interface HistoricalBackfillSourceMetadata extends Record<string, unknown> {
+  selection?: {
+    startBidDt?: string | null;
+    endBidDt?: string | null;
+    sort?: "newest_first" | "oldest_first";
+    limit?: number;
+    campaignId?: string | null;
+    publisherId?: string | null;
+    sourceImportRunId?: string | null;
+  };
+  pilotLabel?: string | null;
+  throttleProfileName?: string | null;
+  checkpointSourceKey?: string | null;
+  checkpointCursor?: {
+    bidDt?: string | null;
+    bidId?: string | null;
+  };
+  candidateCount?: number;
+  selectedCandidateCount?: number;
+  remainingCandidateCount?: number;
+  selectedCandidates?: HistoricalBackfillCandidateSummary[];
+  metrics?: HistoricalBackfillMetrics;
+}
 
 export interface ImportRunItemSummary {
   id: string;
@@ -81,7 +138,7 @@ export interface ImportRunProgress {
 
 export interface ImportRunDetail extends ImportRunProgress {
   id: string;
-  sourceType: string;
+  sourceType: ImportRunSourceType;
   triggerType: "manual" | "scheduled";
   scheduleId: string | null;
   sourceStage: ImportRunSourceStage;
