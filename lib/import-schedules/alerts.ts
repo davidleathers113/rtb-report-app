@@ -1,9 +1,11 @@
 import "server-only";
 
 import {
+  clearImportScheduleAlertAcknowledgement,
   getImportScheduleAlertState,
   updateImportScheduleAlertState,
 } from "@/lib/db/import-schedules";
+import { createImportOpsEvent } from "@/lib/db/import-ops-events";
 import { notifyImportScheduleAlert } from "@/lib/import-schedules/notifications";
 import type { ImportScheduleDetail } from "@/types/import-schedule";
 import type { ImportScheduleAlertState } from "@/lib/db/import-schedules";
@@ -57,12 +59,37 @@ async function maybeSendScheduleAlert(input: {
   let result: Awaited<ReturnType<typeof notifyImportScheduleAlert>>;
   try {
     result = await notifyImportScheduleAlert(input.event);
+    await createImportOpsEvent({
+      eventType: "alert_sent",
+      severity: input.event.kind === "trigger_auth_failed" ? "warning" : "info",
+      source: "system",
+      scheduleId: input.schedule.id,
+      importRunId: input.event.runId ?? null,
+      message: input.event.message,
+      metadataJson: {
+        alertKind: input.event.kind,
+        ...(input.event.metadata ?? {}),
+      },
+    });
   } catch (error) {
     console.error("import-schedules.alert-delivery-failed", {
       scheduleId: input.schedule.id,
       kind: input.event.kind,
       error: error instanceof Error ? error.message : String(error),
     });
+    await createImportOpsEvent({
+      eventType: "alert_failed",
+      severity: "error",
+      source: "system",
+      scheduleId: input.schedule.id,
+      importRunId: input.event.runId ?? null,
+      message:
+        error instanceof Error ? error.message : `Alert delivery failed for ${input.event.kind}.`,
+      metadataJson: {
+        alertKind: input.event.kind,
+        ...(input.event.metadata ?? {}),
+      },
+    }).catch(() => undefined);
     return false;
   }
 
@@ -86,6 +113,26 @@ export async function evaluateImportScheduleAlerts(schedules: ImportScheduleDeta
   let alertsSent = 0;
 
   for (const schedule of schedules) {
+    if (
+      schedule.alertAcknowledgedKey &&
+      (!schedule.currentAlertKey || schedule.alertAcknowledgedKey !== schedule.currentAlertKey)
+    ) {
+      try {
+        await clearImportScheduleAlertAcknowledgement(schedule.id);
+      } catch {
+        // Ignore acknowledgement cleanup failures so alert evaluation can continue.
+      }
+    }
+
+    if (
+      schedule.isPaused ||
+      !schedule.currentAlertKey ||
+      schedule.isCurrentAlertAcknowledged ||
+      schedule.isAlertSnoozed
+    ) {
+      continue;
+    }
+
     const currentAlertState = await getImportScheduleAlertState(schedule.id);
     if (currentAlertState == null) {
       continue;
@@ -184,6 +231,14 @@ export async function evaluateImportScheduleAlerts(schedules: ImportScheduleDeta
       const staleNext = (nextAlertState.stale as Record<string, unknown> | undefined) ?? {};
       staleNext.runId = schedule.activeRun?.id ?? null;
       nextAlertState.stale = staleNext;
+      await createImportOpsEvent({
+        eventType: "schedule_became_stale",
+        severity: "warning",
+        source: "system",
+        scheduleId: schedule.id,
+        importRunId: schedule.activeRun?.id ?? null,
+        message: `${schedule.name} became stale.`,
+      }).catch(() => undefined);
       alertsSent += 1;
     }
 
@@ -294,6 +349,16 @@ export async function notifyTriggerAuthFailureIfNeeded(input: {
       kind: "trigger_auth_failed",
       message: input.message,
       metadata: {
+        authMode: input.authMode,
+        requestSource: input.requestSource,
+      },
+    });
+    await createImportOpsEvent({
+      eventType: "trigger_auth_failed",
+      severity: "warning",
+      source: "api",
+      message: input.message,
+      metadataJson: {
         authMode: input.authMode,
         requestSource: input.requestSource,
       },

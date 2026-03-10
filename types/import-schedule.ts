@@ -1,4 +1,5 @@
 import type { ImportRunSourceStage, ImportRunStatus } from "@/types/import-run";
+import type { ImportOpsEvent, ImportOpsEventPage } from "@/types/ops-event";
 
 export const IMPORT_SCHEDULE_SOURCE_TYPES = ["ringba_recent_import"] as const;
 
@@ -93,10 +94,24 @@ export interface ImportScheduleDetail {
   healthStatus: ImportScheduleHealthStatus;
   healthSummary: string;
   isNoRecentSuccess: boolean;
+  isPaused: boolean;
+  pausedAt: string | null;
+  pauseReason: string | null;
+  currentAlertKey: string | null;
+  currentAlertLabel: string | null;
+  alertAcknowledgedAt: string | null;
+  alertAcknowledgedKey: string | null;
+  isCurrentAlertAcknowledged: boolean;
+  alertSnoozedUntil: string | null;
+  isAlertSnoozed: boolean;
   createdAt: string;
   updatedAt: string;
   activeRun: ImportScheduleRunSummary | null;
   recentRuns: ImportScheduleRunSummary[];
   recentRunTotalCount: number;
   analytics: ImportScheduleAnalytics;
+  recentOpsEvents: ImportOpsEvent[];
+  recentOpsEventTotalCount: number;
 }
+
+export type ImportScheduleOpsEventPage = ImportOpsEventPage;

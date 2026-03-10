@@ -16,6 +16,7 @@ import {
   markImportScheduleRunFailed,
   markImportScheduleRunSucceeded,
 } from "@/lib/db/import-schedules";
+import { createImportOpsEvent } from "@/lib/db/import-ops-events";
 import { investigateBid } from "@/lib/investigations/service";
 import { prepareRingbaRecentImportRun } from "@/lib/import-runs/ringba-recent";
 import type { ImportRunDetail } from "@/types/import-run";
@@ -48,6 +49,14 @@ async function syncScheduledRunStatus(run: ImportRunDetail | null | undefined) {
       runCreatedAt: run.createdAt,
       occurredAt: run.completedAt ?? run.updatedAt,
     });
+    await createImportOpsEvent({
+      eventType: "scheduled_run_succeeded",
+      severity: "info",
+      source: "system",
+      scheduleId: run.scheduleId,
+      importRunId: run.id,
+      message: `Scheduled run ${run.id} completed successfully.`,
+    }).catch(() => undefined);
   }
 
   if (run.status === "completed_with_errors" || run.status === "failed") {
@@ -57,6 +66,18 @@ async function syncScheduledRunStatus(run: ImportRunDetail | null | undefined) {
       occurredAt: run.completedAt ?? run.updatedAt,
       errorMessage: run.lastError ?? `Scheduled run ended with ${run.status}.`,
     });
+    await createImportOpsEvent({
+      eventType: "scheduled_run_failed",
+      severity: "error",
+      source: "system",
+      scheduleId: run.scheduleId,
+      importRunId: run.id,
+      message: run.lastError ?? `Scheduled run ${run.id} ended with ${run.status}.`,
+      metadataJson: {
+        status: run.status,
+        sourceStage: run.sourceStage,
+      },
+    }).catch(() => undefined);
   }
 }
 

@@ -1,11 +1,17 @@
+export const runtime = "nodejs";
+
 import { NextResponse } from "next/server";
 
 import {
   getImportScheduleDetail,
+  getImportScheduleOpsEvents,
   getImportScheduleRunHistory,
+  performImportScheduleAction,
   updateImportSchedule,
 } from "@/lib/import-schedules/service";
 import {
+  importScheduleActionSchema,
+  importScheduleOpsEventsQuerySchema,
   importScheduleRunHistoryQuerySchema,
   updateImportScheduleSchema,
 } from "@/lib/validation/import-schedules";
@@ -36,6 +42,25 @@ export async function GET(
       return NextResponse.json(history);
     }
 
+    if (view === "events") {
+      const parsed = importScheduleOpsEventsQuerySchema.parse({
+        limit: searchParams.get("limit") ?? undefined,
+        offset: searchParams.get("offset") ?? undefined,
+        eventType: searchParams.get("eventType") ?? undefined,
+        severity: searchParams.get("severity") ?? undefined,
+      });
+
+      const events = await getImportScheduleOpsEvents({
+        scheduleId,
+        limit: parsed.limit,
+        offset: parsed.offset,
+        eventType: parsed.eventType,
+        severity: parsed.severity,
+      });
+
+      return NextResponse.json(events);
+    }
+
     const schedule = await getImportScheduleDetail(scheduleId);
 
     if (!schedule) {
@@ -48,6 +73,31 @@ export async function GET(
       {
         error:
           error instanceof Error ? error.message : "Unable to fetch import schedule.",
+      },
+      { status: 400 },
+    );
+  }
+}
+
+export async function POST(
+  request: Request,
+  context: { params: Promise<{ scheduleId: string }> },
+) {
+  try {
+    const { scheduleId } = await context.params;
+    const json = await request.json();
+    const parsed = importScheduleActionSchema.parse(json);
+    const result = await performImportScheduleAction({
+      scheduleId,
+      ...parsed,
+    });
+
+    return NextResponse.json(result);
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error ? error.message : "Unable to perform schedule action.",
       },
       { status: 400 },
     );

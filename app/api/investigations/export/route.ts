@@ -1,3 +1,5 @@
+export const runtime = "nodejs";
+
 import { getInvestigationsForExport } from "@/lib/db/investigations";
 import { buildCsv } from "@/lib/export/csv";
 import { investigationsQuerySchema } from "@/lib/validation/investigations";
@@ -16,18 +18,18 @@ export async function GET(request: Request) {
     const rows = await getInvestigationsForExport(parsed);
     const csv = buildCsv(
       rows.map((row) => ({
-        bid_id: row.bid_id,
-        bid_dt: row.bid_dt,
-        campaign_name: row.campaign_name,
-        publisher_name: row.publisher_name,
-        target_name: row.target_name,
-        bid_amount: row.bid_amount,
-        http_status_code: row.http_status_code,
-        root_cause: row.root_cause,
-        owner_type: row.owner_type,
+        bid_id: row.bidId,
+        bid_dt: row.bidDt,
+        campaign_name: row.campaignName,
+        publisher_name: row.publisherName,
+        target_name: row.targetName,
+        bid_amount: row.bidAmount,
+        http_status_code: row.httpStatusCode,
+        root_cause: row.rootCause,
+        owner_type: row.ownerType,
         explanation: row.explanation,
-        suggested_fix: row.suggested_fix,
-        response_body: row.response_body,
+        suggested_fix: row.suggestedFix,
+        response_body: row.responseBody,
       })),
       [
         "bid_id",

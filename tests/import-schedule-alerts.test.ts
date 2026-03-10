@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/db/import-schedules", () => ({
+  clearImportScheduleAlertAcknowledgement: vi.fn(),
   getImportScheduleAlertState: vi.fn(),
   updateImportScheduleAlertState: vi.fn(),
 }));
@@ -9,7 +10,12 @@ vi.mock("@/lib/import-schedules/notifications", () => ({
   notifyImportScheduleAlert: vi.fn().mockResolvedValue({ delivered: true }),
 }));
 
+vi.mock("@/lib/db/import-ops-events", () => ({
+  createImportOpsEvent: vi.fn(),
+}));
+
 import {
+  clearImportScheduleAlertAcknowledgement,
   getImportScheduleAlertState,
   updateImportScheduleAlertState,
 } from "@/lib/db/import-schedules";
@@ -40,11 +46,23 @@ function buildSchedule(
     healthStatus: "healthy",
     healthSummary: "Schedule is healthy.",
     isNoRecentSuccess: false,
+    isPaused: false,
+    pausedAt: null,
+    pauseReason: null,
+    currentAlertKey: null,
+    currentAlertLabel: null,
+    alertAcknowledgedAt: null,
+    alertAcknowledgedKey: null,
+    isCurrentAlertAcknowledged: false,
+    alertSnoozedUntil: null,
+    isAlertSnoozed: false,
     createdAt: "2026-03-10T00:00:00.000Z",
     updatedAt: "2026-03-10T00:00:00.000Z",
     activeRun: null,
     recentRuns: [],
     recentRunTotalCount: 0,
+    recentOpsEvents: [],
+    recentOpsEventTotalCount: 0,
     analytics: {
       recentRunCount: 0,
       successfulRunCount: 0,
@@ -77,6 +95,8 @@ describe("import schedule alerts", () => {
         healthSummary: "Schedule has failed 3 times in a row.",
         lastFailedAt: "2026-03-10T01:00:00.000Z",
         lastError: "Export failed.",
+        currentAlertKey: "repeated_failures:3",
+        currentAlertLabel: "3 consecutive failures",
       }),
     ]);
 
@@ -102,10 +122,26 @@ describe("import schedule alerts", () => {
         consecutiveFailureCount: 3,
         healthStatus: "failing",
         healthSummary: "Schedule has failed 3 times in a row.",
+        currentAlertKey: "repeated_failures:3",
+        currentAlertLabel: "3 consecutive failures",
       }),
     ]);
 
     expect(notifyImportScheduleAlert).not.toHaveBeenCalled();
+  });
+
+  it("clears stale alert acknowledgements when the alert key changes", async () => {
+    vi.mocked(getImportScheduleAlertState).mockResolvedValue({});
+
+    await evaluateImportScheduleAlerts([
+      buildSchedule({
+        currentAlertKey: null,
+        alertAcknowledgedAt: "2026-03-10T02:00:00.000Z",
+        alertAcknowledgedKey: "repeated_failures:3",
+      }),
+    ]);
+
+    expect(clearImportScheduleAlertAcknowledgement).toHaveBeenCalledWith("schedule-1");
   });
 
   it("dedupes trigger auth alerts in memory", async () => {

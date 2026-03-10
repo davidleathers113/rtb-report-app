@@ -1,7 +1,19 @@
 import "server-only";
 
-import { getSupabaseAdminClient } from "@/lib/db/server";
+import { eq } from "drizzle-orm";
+
+import { getDb, getSqlite } from "@/lib/db/client";
 import { getImportRunDetail } from "@/lib/db/import-runs";
+import {
+  importOpsEvents,
+  importRuns,
+  importSchedules,
+  type ImportOpsEventRow as DbImportOpsEventRow,
+  type ImportRunRow as DbImportRunRow,
+  type ImportScheduleRow as DbImportScheduleRow,
+} from "@/lib/db/schema";
+import { addSeconds, createId, nowIso, toTimestamp } from "@/lib/db/utils";
+import type { ImportOpsEvent } from "@/types/ops-event";
 import type {
   ImportScheduleDetail,
   ImportScheduleHealthStatus,
@@ -19,9 +31,6 @@ import type {
 const SCHEDULE_STALE_RUN_MINUTES = 30;
 const NO_RECENT_SUCCESS_MULTIPLIER = 3;
 const ANALYTICS_RECENT_RUN_LIMIT = 25;
-const IMPORT_SCHEDULE_RUN_SUMMARY_SELECT =
-  "id, schedule_id, trigger_type, status, source_stage, total_found, total_processed, last_error, source_metadata, source_window_start, source_window_end, processor_lease_expires_at, completed_at, created_at, updated_at";
-
 interface ImportScheduleRow {
   id: string;
   name: string;
@@ -38,25 +47,14 @@ interface ImportScheduleRow {
   consecutive_failure_count: number;
   last_terminal_run_created_at: string | null;
   alert_state: Record<string, unknown> | null;
+  paused_at: string | null;
+  pause_reason: string | null;
+  alert_acknowledged_at: string | null;
+  alert_acknowledged_key: string | null;
+  alert_snoozed_until: string | null;
   trigger_lease_expires_at: string | null;
   created_at: string;
   updated_at: string;
-}
-
-interface ClaimedImportScheduleRow {
-  id: string;
-  name: string;
-  is_enabled: boolean;
-  account_id: string;
-  source_type: ImportScheduleSourceType;
-  window_minutes: 5 | 15 | 60;
-  overlap_minutes: number;
-  max_concurrent_runs: number;
-  last_triggered_at: string | null;
-  last_succeeded_at: string | null;
-  last_failed_at: string | null;
-  last_error: string | null;
-  consecutive_failure_count: number;
 }
 
 interface ImportRunScheduleSummaryRow {
@@ -97,6 +95,80 @@ export interface ImportScheduleAlertState {
   };
 }
 
+interface ImportOpsEventRow {
+  id: string;
+  event_type: string;
+  severity: "info" | "warning" | "error";
+  source: "system" | "scheduled_trigger" | "manual_ui" | "api" | "cron";
+  schedule_id: string | null;
+  import_run_id: string | null;
+  message: string;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+}
+
+function mapScheduleDbRow(row: DbImportScheduleRow): ImportScheduleRow {
+  return {
+    id: row.id,
+    name: row.name,
+    is_enabled: row.isEnabled,
+    account_id: row.accountId,
+    source_type: row.sourceType as ImportScheduleSourceType,
+    window_minutes: row.windowMinutes as 5 | 15 | 60,
+    overlap_minutes: row.overlapMinutes,
+    max_concurrent_runs: row.maxConcurrentRuns,
+    last_triggered_at: row.lastTriggeredAt,
+    last_succeeded_at: row.lastSucceededAt,
+    last_failed_at: row.lastFailedAt,
+    last_error: row.lastError,
+    consecutive_failure_count: row.consecutiveFailureCount,
+    last_terminal_run_created_at: row.lastTerminalRunCreatedAt,
+    alert_state: (row.alertState ?? null) as Record<string, unknown> | null,
+    paused_at: row.pausedAt,
+    pause_reason: row.pauseReason,
+    alert_acknowledged_at: row.alertAcknowledgedAt,
+    alert_acknowledged_key: row.alertAcknowledgedKey,
+    alert_snoozed_until: row.alertSnoozedUntil,
+    trigger_lease_expires_at: row.triggerLeaseExpiresAt,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  };
+}
+
+function mapRunSummaryDbRow(row: DbImportRunRow): ImportRunScheduleSummaryRow {
+  return {
+    id: row.id,
+    schedule_id: row.scheduleId,
+    trigger_type: row.triggerType as "manual" | "scheduled",
+    status: row.status as ImportRunStatus,
+    source_stage: row.sourceStage as ImportRunSourceStage,
+    total_found: row.totalFound,
+    total_processed: row.totalProcessed,
+    last_error: row.lastError,
+    source_metadata: (row.sourceMetadata ?? null) as Record<string, unknown> | null,
+    source_window_start: row.sourceWindowStart,
+    source_window_end: row.sourceWindowEnd,
+    processor_lease_expires_at: row.processorLeaseExpiresAt,
+    completed_at: row.completedAt,
+    created_at: row.createdAt,
+    updated_at: row.updatedAt,
+  };
+}
+
+function mapOpsEventDbRow(row: DbImportOpsEventRow): ImportOpsEventRow {
+  return {
+    id: row.id,
+    event_type: row.eventType,
+    severity: row.severity as "info" | "warning" | "error",
+    source: row.source as "system" | "scheduled_trigger" | "manual_ui" | "api" | "cron",
+    schedule_id: row.scheduleId,
+    import_run_id: row.importRunId,
+    message: row.message,
+    metadata_json: (row.metadataJson ?? null) as Record<string, unknown> | null,
+    created_at: row.createdAt,
+  };
+}
+
 function mapSchedule(row: ImportScheduleRow) {
   return {
     id: row.id,
@@ -113,8 +185,32 @@ function mapSchedule(row: ImportScheduleRow) {
     lastError: row.last_error,
     consecutiveFailureCount: row.consecutive_failure_count,
     isNoRecentSuccess: false,
+    isPaused: row.paused_at !== null,
+    pausedAt: row.paused_at,
+    pauseReason: row.pause_reason,
+    currentAlertKey: null,
+    currentAlertLabel: null,
+    alertAcknowledgedAt: row.alert_acknowledged_at,
+    alertAcknowledgedKey: row.alert_acknowledged_key,
+    isCurrentAlertAcknowledged: false,
+    alertSnoozedUntil: row.alert_snoozed_until,
+    isAlertSnoozed: false,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapOpsEvent(row: ImportOpsEventRow): ImportOpsEvent {
+  return {
+    id: row.id,
+    eventType: row.event_type as ImportOpsEvent["eventType"],
+    severity: row.severity,
+    source: row.source,
+    scheduleId: row.schedule_id,
+    importRunId: row.import_run_id,
+    message: row.message,
+    metadataJson: row.metadata_json ?? {},
+    createdAt: row.created_at,
   };
 }
 
@@ -204,6 +300,69 @@ function toBreakdownItems(map: Map<string, number>) {
 
 function getExpectedNoSuccessThresholdMinutes(windowMinutes: number) {
   return Math.max(windowMinutes * NO_RECENT_SUCCESS_MULTIPLIER, windowMinutes + 10);
+}
+
+function isFutureTimestamp(value: string | null) {
+  if (!value) {
+    return false;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return !Number.isNaN(timestamp) && timestamp > Date.now();
+}
+
+function getLatestSourceStageFailure(recentRuns: ImportScheduleRunSummary[]) {
+  return (
+    recentRuns.find((run) => {
+      return (
+        (run.status === "failed" || run.status === "completed_with_errors") &&
+        Boolean(run.failedStage || run.failureReason)
+      );
+    }) ?? null
+  );
+}
+
+function getCurrentAlertDescriptor(input: {
+  healthStatus: ImportScheduleHealthStatus;
+  activeRun: ImportScheduleRunSummary | null;
+  consecutiveFailureCount: number;
+  isNoRecentSuccess: boolean;
+  lastSucceededAt: string | null;
+  recentRuns: ImportScheduleRunSummary[];
+}) {
+  if (input.healthStatus === "stale" && input.activeRun) {
+    return {
+      key: `stale:${input.activeRun.id}`,
+      label: "Stale active run",
+    };
+  }
+
+  if (input.consecutiveFailureCount >= 3) {
+    return {
+      key: `repeated_failures:${input.consecutiveFailureCount}`,
+      label: `${input.consecutiveFailureCount} consecutive failures`,
+    };
+  }
+
+  const latestSourceStageFailure = getLatestSourceStageFailure(input.recentRuns);
+  if (latestSourceStageFailure) {
+    return {
+      key: `source_stage_failure:${latestSourceStageFailure.id}:${latestSourceStageFailure.failedStage ?? latestSourceStageFailure.sourceStage}`,
+      label: `Source-stage failure: ${latestSourceStageFailure.failedStage ?? latestSourceStageFailure.sourceStage}`,
+    };
+  }
+
+  if (input.isNoRecentSuccess) {
+    return {
+      key: `no_recent_success:${input.lastSucceededAt ?? "never"}`,
+      label: "No recent success",
+    };
+  }
+
+  return {
+    key: null,
+    label: null,
+  };
 }
 
 function isNoRecentSuccess(input: {
@@ -298,6 +457,7 @@ function buildHealthStatus(input: {
     return {
       healthStatus: "disabled" as ImportScheduleHealthStatus,
       healthSummary: "Schedule is disabled.",
+      isNoRecentSuccess: false,
     };
   }
 
@@ -373,36 +533,21 @@ function buildHealthStatus(input: {
 }
 
 async function getScheduleRows() {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_schedules")
-    .select("*")
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error(`Unable to fetch import schedules: ${error.message}`);
-  }
-
-  return (data ?? []) as ImportScheduleRow[];
+  const db = getDb();
+  const rows = db.select().from(importSchedules).all() as DbImportScheduleRow[];
+  return rows
+    .map(mapScheduleDbRow)
+    .sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
 async function getScheduleRow(scheduleId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_schedules")
-    .select("*")
-    .eq("id", scheduleId)
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") {
-      return null;
-    }
-
-    throw new Error(`Unable to fetch import schedule: ${error.message}`);
-  }
-
-  return data as ImportScheduleRow;
+  const db = getDb();
+  const row = db
+    .select()
+    .from(importSchedules)
+    .where(eq(importSchedules.id, scheduleId))
+    .get() as DbImportScheduleRow | undefined;
+  return row ? mapScheduleDbRow(row) : null;
 }
 
 async function getScheduleRunRows(scheduleIds: string[]) {
@@ -410,20 +555,18 @@ async function getScheduleRunRows(scheduleIds: string[]) {
     return [] as ImportRunScheduleSummaryRow[];
   }
 
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .select(IMPORT_SCHEDULE_RUN_SUMMARY_SELECT)
-    .in("schedule_id", scheduleIds)
-    .eq("trigger_type", "scheduled")
-    .in("status", ["queued", "running"])
-    .order("created_at", { ascending: false });
-
-  if (error) {
-    throw new Error(`Unable to fetch scheduled runs by schedule: ${error.message}`);
-  }
-
-  return (data ?? []) as ImportRunScheduleSummaryRow[];
+  const db = getDb();
+  return (db.select().from(importRuns).all() as DbImportRunRow[])
+    .filter((row) => {
+      return (
+        row.scheduleId !== null &&
+        scheduleIds.includes(row.scheduleId) &&
+        row.triggerType === "scheduled" &&
+        (row.status === "queued" || row.status === "running")
+      );
+    })
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map(mapRunSummaryDbRow);
 }
 
 async function getRecentRunRowsBySchedule(scheduleIds: string[]) {
@@ -431,20 +574,22 @@ async function getRecentRunRowsBySchedule(scheduleIds: string[]) {
     return [] as ImportRunScheduleSummaryRow[];
   }
 
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .select(IMPORT_SCHEDULE_RUN_SUMMARY_SELECT)
-    .in("schedule_id", scheduleIds)
-    .eq("trigger_type", "scheduled")
-    .order("created_at", { ascending: false })
-    .limit(Math.max(ANALYTICS_RECENT_RUN_LIMIT, scheduleIds.length * 10));
-
-  if (error) {
-    throw new Error(`Unable to fetch recent scheduled runs: ${error.message}`);
-  }
-
-  return (data ?? []) as ImportRunScheduleSummaryRow[];
+  return (await getScheduleRunRows(scheduleIds)).concat(
+    (getDb().select().from(importRuns).all() as DbImportRunRow[])
+      .filter((row) => {
+        return (
+          row.scheduleId !== null &&
+          scheduleIds.includes(row.scheduleId) &&
+          row.triggerType === "scheduled" &&
+          row.status !== "queued" &&
+          row.status !== "running"
+        );
+      })
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map(mapRunSummaryDbRow),
+  )
+    .sort((left, right) => right.created_at.localeCompare(left.created_at))
+    .slice(0, Math.max(ANALYTICS_RECENT_RUN_LIMIT, scheduleIds.length * 10));
 }
 
 async function getRunCountRowsBySchedule(scheduleIds: string[]) {
@@ -452,18 +597,36 @@ async function getRunCountRowsBySchedule(scheduleIds: string[]) {
     return [] as Array<{ schedule_id: string | null }>;
   }
 
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .select("schedule_id")
-    .in("schedule_id", scheduleIds)
-    .eq("trigger_type", "scheduled");
+  return (getDb().select().from(importRuns).all() as DbImportRunRow[])
+    .filter((row) => row.scheduleId !== null && scheduleIds.includes(row.scheduleId))
+    .filter((row) => row.triggerType === "scheduled")
+    .map((row) => ({
+      schedule_id: row.scheduleId,
+    }));
+}
 
-  if (error) {
-    throw new Error(`Unable to fetch schedule run counts: ${error.message}`);
+async function getRecentOpsEventRowsBySchedule(scheduleIds: string[]) {
+  if (scheduleIds.length === 0) {
+    return [] as ImportOpsEventRow[];
   }
 
-  return (data ?? []) as Array<{ schedule_id: string | null }>;
+  return (getDb().select().from(importOpsEvents).all() as DbImportOpsEventRow[])
+    .filter((row) => row.scheduleId !== null && scheduleIds.includes(row.scheduleId))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .slice(0, Math.max(25, scheduleIds.length * 10))
+    .map(mapOpsEventDbRow);
+}
+
+async function getOpsEventCountRowsBySchedule(scheduleIds: string[]) {
+  if (scheduleIds.length === 0) {
+    return [] as Array<{ schedule_id: string | null }>;
+  }
+
+  return (getDb().select().from(importOpsEvents).all() as DbImportOpsEventRow[])
+    .filter((row) => row.scheduleId !== null && scheduleIds.includes(row.scheduleId))
+    .map((row) => ({
+      schedule_id: row.scheduleId,
+    }));
 }
 
 function groupRecentRunsBySchedule(rows: ImportRunScheduleSummaryRow[]) {
@@ -580,16 +743,41 @@ function buildAnalyticsBySchedule(rows: ImportRunScheduleSummaryRow[]) {
   return analyticsBySchedule;
 }
 
+function groupRecentOpsEventsBySchedule(rows: ImportOpsEventRow[]) {
+  const eventsBySchedule = new Map<string, ImportOpsEvent[]>();
+
+  for (const row of rows) {
+    const scheduleId = row.schedule_id;
+    if (!scheduleId) {
+      continue;
+    }
+
+    const current = eventsBySchedule.get(scheduleId) ?? [];
+    if (current.length >= 5) {
+      continue;
+    }
+
+    current.push(mapOpsEvent(row));
+    eventsBySchedule.set(scheduleId, current);
+  }
+
+  return eventsBySchedule;
+}
+
 export async function getImportSchedules(): Promise<ImportScheduleDetail[]> {
   const rows = await getScheduleRows();
   const scheduleIds = rows.map((row) => row.id);
   const activeRunRows = await getScheduleRunRows(scheduleIds);
   const recentRunRows = await getRecentRunRowsBySchedule(scheduleIds);
   const runCountRows = await getRunCountRowsBySchedule(scheduleIds);
+  const recentOpsEventRows = await getRecentOpsEventRowsBySchedule(scheduleIds);
+  const opsEventCountRows = await getOpsEventCountRowsBySchedule(scheduleIds);
   const activeRunsBySchedule = new Map<string, ImportScheduleRunSummary | null>();
   const recentRunsBySchedule = groupRecentRunsBySchedule(recentRunRows);
   const recentRunCountsBySchedule = countRunsBySchedule(runCountRows);
   const analyticsBySchedule = buildAnalyticsBySchedule(recentRunRows);
+  const recentOpsEventsBySchedule = groupRecentOpsEventsBySchedule(recentOpsEventRows);
+  const recentOpsEventCountsBySchedule = countRunsBySchedule(opsEventCountRows);
 
   for (const row of activeRunRows) {
     if (!row.schedule_id || activeRunsBySchedule.has(row.schedule_id)) {
@@ -610,12 +798,26 @@ export async function getImportSchedules(): Promise<ImportScheduleDetail[]> {
         lastFailedAt: row.last_failed_at,
         consecutiveFailureCount: row.consecutive_failure_count,
       });
+      const recentRuns = recentRunsBySchedule.get(row.id) ?? [];
+      const alertDescriptor = getCurrentAlertDescriptor({
+        healthStatus: health.healthStatus,
+        activeRun,
+        consecutiveFailureCount: row.consecutive_failure_count,
+        isNoRecentSuccess: health.isNoRecentSuccess,
+        lastSucceededAt: row.last_succeeded_at,
+        recentRuns,
+      });
+      const isAlertSnoozed = isFutureTimestamp(row.alert_snoozed_until);
+      const isCurrentAlertAcknowledged =
+        Boolean(row.alert_acknowledged_at) &&
+        row.alert_acknowledged_key !== null &&
+        row.alert_acknowledged_key === alertDescriptor.key;
 
       return {
         ...mapSchedule(row),
         ...health,
         activeRun,
-        recentRuns: recentRunsBySchedule.get(row.id) ?? [],
+        recentRuns,
         recentRunTotalCount: recentRunCountsBySchedule.get(row.id) ?? 0,
         analytics: analyticsBySchedule.get(row.id) ?? {
           recentRunCount: 0,
@@ -630,6 +832,12 @@ export async function getImportSchedules(): Promise<ImportScheduleDetail[]> {
           sourceStageFailureBreakdown: [],
           rootCauseSummary: [],
         },
+        currentAlertKey: alertDescriptor.key,
+        currentAlertLabel: alertDescriptor.label,
+        isCurrentAlertAcknowledged,
+        isAlertSnoozed,
+        recentOpsEvents: recentOpsEventsBySchedule.get(row.id) ?? [],
+        recentOpsEventTotalCount: recentOpsEventCountsBySchedule.get(row.id) ?? 0,
       };
     })(),
   })).sort((left, right) => {
@@ -658,27 +866,52 @@ export async function createImportSchedule(input: {
   overlapMinutes: number;
   maxConcurrentRuns: number;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_schedules")
-    .insert({
-      name: input.name,
-      is_enabled: input.isEnabled,
-      account_id: input.accountId,
-      source_type: input.sourceType,
-      window_minutes: input.windowMinutes,
-      overlap_minutes: input.overlapMinutes,
-      max_concurrent_runs: input.maxConcurrentRuns,
-    })
-    .select("*")
-    .single();
+  const db = getDb();
+  const now = nowIso();
+  const row: ImportScheduleRow = {
+    id: createId(),
+    name: input.name,
+    is_enabled: input.isEnabled,
+    account_id: input.accountId,
+    source_type: input.sourceType,
+    window_minutes: input.windowMinutes,
+    overlap_minutes: input.overlapMinutes,
+    max_concurrent_runs: input.maxConcurrentRuns,
+    last_triggered_at: null,
+    last_succeeded_at: null,
+    last_failed_at: null,
+    last_error: null,
+    consecutive_failure_count: 0,
+    last_terminal_run_created_at: null,
+    alert_state: {},
+    paused_at: null,
+    pause_reason: null,
+    alert_acknowledged_at: null,
+    alert_acknowledged_key: null,
+    alert_snoozed_until: null,
+    trigger_lease_expires_at: null,
+    created_at: now,
+    updated_at: now,
+  };
 
-  if (error || !data) {
-    throw new Error(`Unable to create import schedule: ${error?.message ?? "unknown error"}`);
-  }
+  db.insert(importSchedules)
+    .values({
+      id: row.id,
+      name: row.name,
+      isEnabled: row.is_enabled,
+      accountId: row.account_id,
+      sourceType: row.source_type,
+      windowMinutes: row.window_minutes,
+      overlapMinutes: row.overlap_minutes,
+      maxConcurrentRuns: row.max_concurrent_runs,
+      alertState: row.alert_state ?? {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })
+    .run();
 
   return {
-    ...mapSchedule(data as ImportScheduleRow),
+    ...mapSchedule(row),
     healthStatus: input.isEnabled ? "warning" : "disabled",
     healthSummary: input.isEnabled
       ? "Schedule has not completed a run yet."
@@ -687,6 +920,8 @@ export async function createImportSchedule(input: {
     activeRun: null,
     recentRuns: [],
     recentRunTotalCount: 0,
+    recentOpsEvents: [],
+    recentOpsEventTotalCount: 0,
     analytics: {
       recentRunCount: 0,
       successfulRunCount: 0,
@@ -711,33 +946,28 @@ export async function updateImportSchedule(input: {
   overlapMinutes?: number;
   maxConcurrentRuns?: number;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const updateData: Record<string, unknown> = {};
 
   if (input.name !== undefined) {
     updateData.name = input.name;
   }
   if (input.isEnabled !== undefined) {
-    updateData.is_enabled = input.isEnabled;
+    updateData.isEnabled = input.isEnabled;
   }
   if (input.windowMinutes !== undefined) {
-    updateData.window_minutes = input.windowMinutes;
+    updateData.windowMinutes = input.windowMinutes;
   }
   if (input.overlapMinutes !== undefined) {
-    updateData.overlap_minutes = input.overlapMinutes;
+    updateData.overlapMinutes = input.overlapMinutes;
   }
   if (input.maxConcurrentRuns !== undefined) {
-    updateData.max_concurrent_runs = input.maxConcurrentRuns;
+    updateData.maxConcurrentRuns = input.maxConcurrentRuns;
   }
+  updateData.updatedAt = now;
 
-  const { error } = await supabase
-    .from("import_schedules")
-    .update(updateData)
-    .eq("id", input.scheduleId);
-
-  if (error) {
-    throw new Error(`Unable to update import schedule: ${error.message}`);
-  }
+  db.update(importSchedules).set(updateData).where(eq(importSchedules.id, input.scheduleId)).run();
 
   return getImportSchedules().then((schedules) => {
     const schedule = schedules.find((current) => current.id === input.scheduleId);
@@ -759,56 +989,123 @@ export async function claimDueImportSchedules(input?: {
   leaseSeconds?: number;
   staleAfterMinutes?: number;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.rpc("claim_due_import_schedules", {
-    p_limit: input?.limit ?? 10,
-    p_lease_seconds: input?.leaseSeconds ?? 120,
-    p_stale_after_minutes: input?.staleAfterMinutes ?? SCHEDULE_STALE_RUN_MINUTES,
-  });
+  const db = getDb();
+  const sqlite = getSqlite();
+  const now = nowIso();
+  const limit = Math.max(1, input?.limit ?? 10);
+  const staleAfterMinutes = Math.max(5, input?.staleAfterMinutes ?? SCHEDULE_STALE_RUN_MINUTES);
+  const leaseExpiresAt = addSeconds(now, input?.leaseSeconds ?? 120);
 
-  if (error) {
-    throw new Error(`Unable to claim due import schedules: ${error.message}`);
-  }
+  return sqlite.transaction(() => {
+    const scheduleRows = (db.select().from(importSchedules).all() as DbImportScheduleRow[])
+      .map(mapScheduleDbRow)
+      .sort((left, right) => {
+        const leftTrigger = left.last_triggered_at ?? "";
+        const rightTrigger = right.last_triggered_at ?? "";
+        if (leftTrigger !== rightTrigger) {
+          return leftTrigger.localeCompare(rightTrigger);
+        }
+        return left.created_at.localeCompare(right.created_at);
+      });
+    const runRows = (db.select().from(importRuns).all() as DbImportRunRow[]).map(
+      mapRunSummaryDbRow,
+    );
+    const claimed: ImportScheduleRow[] = [];
+    const nowMs = toTimestamp(now) ?? 0;
+    const staleCutoffMs = nowMs - staleAfterMinutes * 60 * 1000;
 
-  return ((data ?? []) as ClaimedImportScheduleRow[]).map((row) => ({
-    id: row.id,
-    name: row.name,
-    isEnabled: row.is_enabled,
-    accountId: row.account_id,
-    sourceType: row.source_type,
-    windowMinutes: row.window_minutes,
-    overlapMinutes: row.overlap_minutes,
-    maxConcurrentRuns: row.max_concurrent_runs,
-    lastTriggeredAt: row.last_triggered_at,
-    lastSucceededAt: row.last_succeeded_at,
-    lastFailedAt: row.last_failed_at,
-    lastError: row.last_error,
-    consecutiveFailureCount: row.consecutive_failure_count,
-  }));
+    for (const schedule of scheduleRows) {
+      if (claimed.length >= limit) {
+        break;
+      }
+
+      if (!schedule.is_enabled || schedule.paused_at !== null) {
+        continue;
+      }
+
+      const leaseMs = toTimestamp(schedule.trigger_lease_expires_at);
+      if (leaseMs !== null && leaseMs > nowMs) {
+        continue;
+      }
+
+      const dueCutoffMs = nowMs - Math.max(schedule.window_minutes, 1) * 60 * 1000;
+      const lastTriggeredMs = toTimestamp(schedule.last_triggered_at);
+      if (lastTriggeredMs !== null && lastTriggeredMs > dueCutoffMs) {
+        continue;
+      }
+
+      const activeNonStaleRunCount = runRows.filter((run) => {
+        if (run.schedule_id !== schedule.id || run.trigger_type !== "scheduled") {
+          return false;
+        }
+
+        if (run.status !== "queued" && run.status !== "running") {
+          return false;
+        }
+
+        const updatedAtMs = toTimestamp(run.updated_at);
+        const processorLeaseMs = toTimestamp(run.processor_lease_expires_at);
+        const leaseActive = processorLeaseMs !== null && processorLeaseMs > nowMs;
+        const stale =
+          !leaseActive && updatedAtMs !== null && updatedAtMs <= staleCutoffMs;
+
+        return !stale;
+      }).length;
+
+      if (activeNonStaleRunCount >= schedule.max_concurrent_runs) {
+        continue;
+      }
+
+      db.update(importSchedules)
+        .set({
+          triggerLeaseExpiresAt: leaseExpiresAt,
+          updatedAt: now,
+        })
+        .where(eq(importSchedules.id, schedule.id))
+        .run();
+
+      claimed.push({
+        ...schedule,
+        trigger_lease_expires_at: leaseExpiresAt,
+        updated_at: now,
+      });
+    }
+
+    return claimed.map((row) => ({
+      id: row.id,
+      name: row.name,
+      isEnabled: row.is_enabled,
+      accountId: row.account_id,
+      sourceType: row.source_type,
+      windowMinutes: row.window_minutes,
+      overlapMinutes: row.overlap_minutes,
+      maxConcurrentRuns: row.max_concurrent_runs,
+      lastTriggeredAt: row.last_triggered_at,
+      lastSucceededAt: row.last_succeeded_at,
+      lastFailedAt: row.last_failed_at,
+      lastError: row.last_error,
+      consecutiveFailureCount: row.consecutive_failure_count,
+    }));
+  })();
 }
 
 export async function markImportScheduleTriggered(input: {
   scheduleId: string;
   clearError?: boolean;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const updateData: Record<string, unknown> = {
-    last_triggered_at: new Date().toISOString(),
-    trigger_lease_expires_at: null,
+    lastTriggeredAt: now,
+    triggerLeaseExpiresAt: null,
+    updatedAt: now,
   };
 
   if (input.clearError === true) {
-    updateData.last_error = null;
+    updateData.lastError = null;
   }
 
-  const { error } = await supabase
-    .from("import_schedules")
-    .update(updateData)
-    .eq("id", input.scheduleId);
-
-  if (error) {
-    throw new Error(`Unable to mark import schedule triggered: ${error.message}`);
-  }
+  db.update(importSchedules).set(updateData).where(eq(importSchedules.id, input.scheduleId)).run();
 }
 
 export async function markImportScheduleRunSucceeded(input: {
@@ -816,7 +1113,7 @@ export async function markImportScheduleRunSucceeded(input: {
   runCreatedAt: string;
   occurredAt?: string;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
   const current = await getScheduleRow(input.scheduleId);
 
   if (!current) {
@@ -840,21 +1137,18 @@ export async function markImportScheduleRunSucceeded(input: {
     return;
   }
 
-  const occurredAt = input.occurredAt ?? new Date().toISOString();
-  const { error } = await supabase
-    .from("import_schedules")
-    .update({
-      last_terminal_run_created_at: input.runCreatedAt,
-      last_succeeded_at: occurredAt,
-      consecutive_failure_count: 0,
-      last_error: null,
-      trigger_lease_expires_at: null,
+  const occurredAt = input.occurredAt ?? nowIso();
+  db.update(importSchedules)
+    .set({
+      lastTerminalRunCreatedAt: input.runCreatedAt,
+      lastSucceededAt: occurredAt,
+      consecutiveFailureCount: 0,
+      lastError: null,
+      triggerLeaseExpiresAt: null,
+      updatedAt: occurredAt,
     })
-    .eq("id", input.scheduleId);
-
-  if (error) {
-    throw new Error(`Unable to mark import schedule success: ${error.message}`);
-  }
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
 }
 
 export async function markImportScheduleRunFailed(input: {
@@ -863,7 +1157,7 @@ export async function markImportScheduleRunFailed(input: {
   occurredAt?: string;
   errorMessage: string;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
   const current = await getScheduleRow(input.scheduleId);
 
   if (!current) {
@@ -893,21 +1187,18 @@ export async function markImportScheduleRunFailed(input: {
       : typeof current.consecutive_failure_count === "number"
         ? current.consecutive_failure_count + 1
       : 1;
-  const occurredAt = input.occurredAt ?? new Date().toISOString();
-  const { error } = await supabase
-    .from("import_schedules")
-    .update({
-      last_terminal_run_created_at: input.runCreatedAt,
-      last_failed_at: occurredAt,
-      consecutive_failure_count: nextFailureCount,
-      last_error: input.errorMessage,
-      trigger_lease_expires_at: null,
+  const occurredAt = input.occurredAt ?? nowIso();
+  db.update(importSchedules)
+    .set({
+      lastTerminalRunCreatedAt: input.runCreatedAt,
+      lastFailedAt: occurredAt,
+      consecutiveFailureCount: nextFailureCount,
+      lastError: input.errorMessage,
+      triggerLeaseExpiresAt: null,
+      updatedAt: occurredAt,
     })
-    .eq("id", input.scheduleId);
-
-  if (error) {
-    throw new Error(`Unable to mark import schedule failure: ${error.message}`);
-  }
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
 }
 
 export async function markImportScheduleTriggerFailure(input: {
@@ -915,7 +1206,7 @@ export async function markImportScheduleTriggerFailure(input: {
   occurredAt?: string;
   errorMessage: string;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
   const current = await getScheduleRow(input.scheduleId);
 
   if (!current) {
@@ -927,19 +1218,17 @@ export async function markImportScheduleTriggerFailure(input: {
       ? current.consecutive_failure_count + 1
       : 1;
 
-  const { error } = await supabase
-    .from("import_schedules")
-    .update({
-      last_failed_at: input.occurredAt ?? new Date().toISOString(),
-      consecutive_failure_count: nextFailureCount,
-      last_error: input.errorMessage,
-      trigger_lease_expires_at: null,
+  const occurredAt = input.occurredAt ?? nowIso();
+  db.update(importSchedules)
+    .set({
+      lastFailedAt: occurredAt,
+      consecutiveFailureCount: nextFailureCount,
+      lastError: input.errorMessage,
+      triggerLeaseExpiresAt: null,
+      updatedAt: occurredAt,
     })
-    .eq("id", input.scheduleId);
-
-  if (error) {
-    throw new Error(`Unable to mark import schedule trigger failure: ${error.message}`);
-  }
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
 }
 
 export async function getImportScheduleAlertState(scheduleId: string) {
@@ -956,17 +1245,96 @@ export async function updateImportScheduleAlertState(input: {
   scheduleId: string;
   alertState: Record<string, unknown>;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
-    .from("import_schedules")
-    .update({
-      alert_state: input.alertState,
+  getDb()
+    .update(importSchedules)
+    .set({
+      alertState: input.alertState,
+      updatedAt: nowIso(),
     })
-    .eq("id", input.scheduleId);
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
+}
 
-  if (error) {
-    throw new Error(`Unable to update import schedule alert state: ${error.message}`);
-  }
+export async function acknowledgeImportScheduleAlert(input: {
+  scheduleId: string;
+  alertKey: string;
+}) {
+  const now = nowIso();
+  getDb()
+    .update(importSchedules)
+    .set({
+      alertAcknowledgedAt: now,
+      alertAcknowledgedKey: input.alertKey,
+      updatedAt: now,
+    })
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
+}
+
+export async function clearImportScheduleAlertAcknowledgement(scheduleId: string) {
+  getDb()
+    .update(importSchedules)
+    .set({
+      alertAcknowledgedAt: null,
+      alertAcknowledgedKey: null,
+      updatedAt: nowIso(),
+    })
+    .where(eq(importSchedules.id, scheduleId))
+    .run();
+}
+
+export async function snoozeImportScheduleAlerts(input: {
+  scheduleId: string;
+  snoozedUntil: string;
+}) {
+  getDb()
+    .update(importSchedules)
+    .set({
+      alertSnoozedUntil: input.snoozedUntil,
+      updatedAt: nowIso(),
+    })
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
+}
+
+export async function clearImportScheduleAlertSnooze(scheduleId: string) {
+  getDb()
+    .update(importSchedules)
+    .set({
+      alertSnoozedUntil: null,
+      updatedAt: nowIso(),
+    })
+    .where(eq(importSchedules.id, scheduleId))
+    .run();
+}
+
+export async function pauseImportSchedule(input: {
+  scheduleId: string;
+  reason?: string | null;
+}) {
+  const now = nowIso();
+  getDb()
+    .update(importSchedules)
+    .set({
+      pausedAt: now,
+      pauseReason: input.reason ?? null,
+      triggerLeaseExpiresAt: null,
+      updatedAt: now,
+    })
+    .where(eq(importSchedules.id, input.scheduleId))
+    .run();
+}
+
+export async function resumeImportSchedule(scheduleId: string) {
+  getDb()
+    .update(importSchedules)
+    .set({
+      pausedAt: null,
+      pauseReason: null,
+      updatedAt: nowIso(),
+    })
+    .where(eq(importSchedules.id, scheduleId))
+    .run();
 }
 
 export async function getImportScheduleRunHistory(input: {
@@ -975,25 +1343,16 @@ export async function getImportScheduleRunHistory(input: {
   offset?: number;
   statusFilter?: ImportScheduleRunHistoryStatusFilter;
 }): Promise<ImportScheduleRunHistoryPage> {
-  const supabase = getSupabaseAdminClient();
   const limit = Math.max(1, Math.min(input.limit ?? 10, 50));
   const offset = Math.max(0, input.offset ?? 0);
   const statusFilter = input.statusFilter ?? "all";
+  const rows = (getDb().select().from(importRuns).all() as DbImportRunRow[])
+    .filter((row) => row.scheduleId === input.scheduleId && row.triggerType === "scheduled")
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+    .map(mapRunSummaryDbRow);
 
   if (statusFilter === "stale") {
-    const { data, error } = await supabase
-      .from("import_runs")
-      .select(IMPORT_SCHEDULE_RUN_SUMMARY_SELECT)
-      .eq("schedule_id", input.scheduleId)
-      .eq("trigger_type", "scheduled")
-      .in("status", ["queued", "running"])
-      .order("created_at", { ascending: false });
-
-    if (error) {
-      throw new Error(`Unable to fetch stale schedule run history: ${error.message}`);
-    }
-
-    const staleRuns = ((data ?? []) as ImportRunScheduleSummaryRow[])
+    const staleRuns = rows
       .filter((row) => isScheduleRunStale(row))
       .map((row) => mapRunSummary(row));
 
@@ -1006,27 +1365,12 @@ export async function getImportScheduleRunHistory(input: {
     };
   }
 
-  let query = supabase
-    .from("import_runs")
-    .select(IMPORT_SCHEDULE_RUN_SUMMARY_SELECT, { count: "exact" })
-    .eq("schedule_id", input.scheduleId)
-    .eq("trigger_type", "scheduled")
-    .order("created_at", { ascending: false })
-    .range(offset, offset + limit - 1);
-
-  if (statusFilter !== "all") {
-    query = query.eq("status", statusFilter);
-  }
-
-  const { data, error, count } = await query;
-
-  if (error) {
-    throw new Error(`Unable to fetch schedule run history: ${error.message}`);
-  }
+  const filteredRows =
+    statusFilter === "all" ? rows : rows.filter((row) => row.status === statusFilter);
 
   return {
-    items: ((data ?? []) as ImportRunScheduleSummaryRow[]).map((row) => mapRunSummary(row)),
-    total: count ?? 0,
+    items: filteredRows.slice(offset, offset + limit).map((row) => mapRunSummary(row)),
+    total: filteredRows.length,
     limit,
     offset,
     statusFilter,
@@ -1034,20 +1378,12 @@ export async function getImportScheduleRunHistory(input: {
 }
 
 export async function getActiveScheduledImportRuns(input?: { limit?: number }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .select("id")
-    .eq("trigger_type", "scheduled")
-    .in("status", ["queued", "running"])
-    .order("created_at", { ascending: true })
-    .limit(input?.limit ?? 10);
-
-  if (error) {
-    throw new Error(`Unable to fetch active scheduled import runs: ${error.message}`);
-  }
-
-  const runIds = (data ?? []).map((row) => row.id as string);
+  const runIds = (getDb().select().from(importRuns).all() as DbImportRunRow[])
+    .filter((row) => row.triggerType === "scheduled")
+    .filter((row) => row.status === "queued" || row.status === "running")
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(0, input?.limit ?? 10)
+    .map((row) => row.id);
   const runs = await Promise.all(runIds.map((runId) => getImportRunDetail(runId)));
 
   return runs.filter((run): run is NonNullable<typeof run> => Boolean(run));

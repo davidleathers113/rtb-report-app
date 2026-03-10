@@ -1,3 +1,5 @@
+export const runtime = "nodejs";
+
 import Link from "next/link";
 
 import { BulkInvestigationClient } from "@/components/investigations/bulk-investigation-client";

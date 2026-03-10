@@ -1,5 +1,16 @@
 import "server-only";
 
+import { eq, inArray } from "drizzle-orm";
+
+import { getDb, getSqlite } from "@/lib/db/client";
+import {
+  bidEvents,
+  bidInvestigations,
+  importRuns,
+  type BidEventRow,
+  type BidInvestigationRow,
+} from "@/lib/db/schema";
+import { addSeconds, createId, nowIso, toTimestamp } from "@/lib/db/utils";
 import type {
   DashboardMetric,
   DashboardStats,
@@ -11,82 +22,28 @@ import type {
   InvestigationsPageData,
   NormalizedBidData,
 } from "@/types/bid";
-import { getSupabaseAdminClient } from "@/lib/db/server";
-
-export interface BidInvestigationRow {
-  id: string;
-  import_run_id: string | null;
-  bid_id: string;
-  bid_dt: string | null;
-  campaign_name: string | null;
-  campaign_id: string | null;
-  publisher_name: string | null;
-  publisher_id: string | null;
-  target_name: string | null;
-  target_id: string | null;
-  buyer_name: string | null;
-  buyer_id: string | null;
-  bid_amount: number | null;
-  winning_bid: number | null;
-  is_zero_bid: boolean;
-  reason_for_reject: string | null;
-  http_status_code: number | null;
-  parsed_error_message: string | null;
-  request_body: Record<string, unknown> | string | null;
-  response_body: Record<string, unknown> | string | null;
-  raw_trace_json: Record<string, unknown>;
-  outcome: InvestigationListItem["outcome"];
-  root_cause: InvestigationListItem["rootCause"];
-  root_cause_confidence: number;
-  severity: InvestigationListItem["severity"];
-  owner_type: InvestigationListItem["ownerType"];
-  suggested_fix: string;
-  explanation: string;
-  evidence_json: DiagnosisResult["evidence"];
-  fetch_status: FetchStatus;
-  fetched_at: string | null;
-  fetch_started_at: string | null;
-  last_error: string | null;
-  refresh_requested_at: string | null;
-  lease_expires_at: string | null;
-  fetch_attempt_count: number;
-  imported_at: string;
-  created_at: string;
-  updated_at: string;
-}
-
-interface BidEventRow {
-  id: string;
-  bid_investigation_id: string;
-  event_name: string;
-  event_timestamp: string | null;
-  event_vals_json: Record<string, unknown> | null;
-  event_str_vals_json: Record<string, string> | null;
-  created_at: string;
-  updated_at: string;
-}
 
 function toListItem(row: BidInvestigationRow): InvestigationListItem {
   return {
     id: row.id,
-    bidId: row.bid_id,
-    bidDt: row.bid_dt,
-    campaignName: row.campaign_name,
-    publisherName: row.publisher_name,
-    targetName: row.target_name,
-    bidAmount: row.bid_amount,
-    winningBid: row.winning_bid,
-    isZeroBid: row.is_zero_bid,
-    httpStatusCode: row.http_status_code,
-    rootCause: row.root_cause,
-    ownerType: row.owner_type,
-    severity: row.severity,
+    bidId: row.bidId,
+    bidDt: row.bidDt,
+    campaignName: row.campaignName,
+    publisherName: row.publisherName,
+    targetName: row.targetName,
+    bidAmount: row.bidAmount,
+    winningBid: row.winningBid,
+    isZeroBid: row.isZeroBid,
+    httpStatusCode: row.httpStatusCode,
+    rootCause: row.rootCause as InvestigationListItem["rootCause"],
+    ownerType: row.ownerType as InvestigationListItem["ownerType"],
+    severity: row.severity as InvestigationListItem["severity"],
     explanation: row.explanation,
-    outcome: row.outcome,
-    fetchStatus: row.fetch_status,
-    fetchedAt: row.fetched_at,
-    lastError: row.last_error,
-    importedAt: row.imported_at,
+    outcome: row.outcome as InvestigationListItem["outcome"],
+    fetchStatus: row.fetchStatus as FetchStatus,
+    fetchedAt: row.fetchedAt,
+    lastError: row.lastError,
+    importedAt: row.importedAt,
   };
 }
 
@@ -96,58 +53,58 @@ function toDetail(
 ): InvestigationDetail {
   return {
     id: row.id,
-    importRunId: row.import_run_id,
-    bidId: row.bid_id,
-    bidDt: row.bid_dt,
-    campaignName: row.campaign_name,
-    campaignId: row.campaign_id,
-    publisherName: row.publisher_name,
-    publisherId: row.publisher_id,
-    targetName: row.target_name,
-    targetId: row.target_id,
-    buyerName: row.buyer_name,
-    buyerId: row.buyer_id,
-    bidAmount: row.bid_amount,
-    winningBid: row.winning_bid,
-    isZeroBid: row.is_zero_bid,
-    reasonForReject: row.reason_for_reject,
-    httpStatusCode: row.http_status_code,
-    errorMessage: row.parsed_error_message,
-    requestBody: row.request_body,
-    responseBody: row.response_body,
-    rawTraceJson: row.raw_trace_json,
+    importRunId: row.importRunId,
+    bidId: row.bidId,
+    bidDt: row.bidDt,
+    campaignName: row.campaignName,
+    campaignId: row.campaignId,
+    publisherName: row.publisherName,
+    publisherId: row.publisherId,
+    targetName: row.targetName,
+    targetId: row.targetId,
+    buyerName: row.buyerName,
+    buyerId: row.buyerId,
+    bidAmount: row.bidAmount,
+    winningBid: row.winningBid,
+    isZeroBid: row.isZeroBid,
+    reasonForReject: row.reasonForReject,
+    httpStatusCode: row.httpStatusCode,
+    errorMessage: row.parsedErrorMessage,
+    requestBody: (row.requestBody ?? null) as Record<string, unknown> | string | null,
+    responseBody: (row.responseBody ?? null) as Record<string, unknown> | string | null,
+    rawTraceJson: (row.rawTraceJson ?? {}) as Record<string, unknown>,
     relevantEvents: eventRows.map((event) => ({
       id: event.id,
-      eventName: event.event_name,
-      eventTimestamp: event.event_timestamp,
-      eventValsJson: event.event_vals_json,
-      eventStrValsJson: event.event_str_vals_json,
+      eventName: event.eventName,
+      eventTimestamp: event.eventTimestamp,
+      eventValsJson: (event.eventValsJson ?? null) as Record<string, unknown> | null,
+      eventStrValsJson: (event.eventStrValsJson ?? null) as Record<string, string> | null,
     })),
     events: eventRows.map((event) => ({
       id: event.id,
-      eventName: event.event_name,
-      eventTimestamp: event.event_timestamp,
-      eventValsJson: event.event_vals_json,
-      eventStrValsJson: event.event_str_vals_json,
+      eventName: event.eventName,
+      eventTimestamp: event.eventTimestamp,
+      eventValsJson: (event.eventValsJson ?? null) as Record<string, unknown> | null,
+      eventStrValsJson: (event.eventStrValsJson ?? null) as Record<string, string> | null,
     })),
-    outcome: row.outcome,
-    rootCause: row.root_cause,
-    confidence: row.root_cause_confidence,
-    severity: row.severity,
-    ownerType: row.owner_type,
-    suggestedFix: row.suggested_fix,
+    outcome: row.outcome as InvestigationDetail["outcome"],
+    rootCause: row.rootCause as InvestigationDetail["rootCause"],
+    confidence: row.rootCauseConfidence,
+    severity: row.severity as InvestigationDetail["severity"],
+    ownerType: row.ownerType as InvestigationDetail["ownerType"],
+    suggestedFix: row.suggestedFix,
     explanation: row.explanation,
-    evidence: row.evidence_json,
-    fetchStatus: row.fetch_status,
-    fetchedAt: row.fetched_at,
-    fetchStartedAt: row.fetch_started_at,
-    lastError: row.last_error,
-    refreshRequestedAt: row.refresh_requested_at,
-    leaseExpiresAt: row.lease_expires_at,
-    fetchAttemptCount: row.fetch_attempt_count,
-    importedAt: row.imported_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    evidence: (row.evidenceJson ?? []) as DiagnosisResult["evidence"],
+    fetchStatus: row.fetchStatus as FetchStatus,
+    fetchedAt: row.fetchedAt,
+    fetchStartedAt: row.fetchStartedAt,
+    lastError: row.lastError,
+    refreshRequestedAt: row.refreshRequestedAt,
+    leaseExpiresAt: row.leaseExpiresAt,
+    fetchAttemptCount: row.fetchAttemptCount,
+    importedAt: row.importedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -173,7 +130,7 @@ function buildIssuesOverTime(rows: BidInvestigationRow[]): DashboardTimePoint[] 
   const byDate = new Map<string, DashboardTimePoint>();
 
   for (const row of rows) {
-    const dateKey = (row.bid_dt ?? row.imported_at).slice(0, 10);
+    const dateKey = (row.bidDt ?? row.importedAt).slice(0, 10);
     const existing = byDate.get(dateKey) ?? {
       date: dateKey,
       total: 0,
@@ -210,52 +167,41 @@ function sanitizeSearch(search: string) {
 
 interface ClaimBidInvestigationRow {
   id: string;
-  bid_id: string;
-  fetch_status: FetchStatus;
-  should_fetch: boolean;
-  fetched_at: string | null;
-  last_error: string | null;
-  fetch_attempt_count: number;
-  lease_expires_at: string | null;
+  bidId: string;
+  fetchStatus: FetchStatus;
+  shouldFetch: boolean;
+  fetchedAt: string | null;
+  lastError: string | null;
+  fetchAttemptCount: number;
+  leaseExpiresAt: string | null;
 }
 
 async function getBidInvestigationRowByBidId(bidId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .select("*")
-    .eq("bid_id", bidId)
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") {
-      return null;
-    }
-
-    throw new Error(`Unable to fetch investigation row: ${error.message}`);
-  }
-
-  return data as BidInvestigationRow;
+  const db = getDb();
+  const row = db
+    .select()
+    .from(bidInvestigations)
+    .where(eq(bidInvestigations.bidId, bidId))
+    .get() as BidInvestigationRow | undefined;
+  return row ?? null;
 }
 
 export async function createImportRun(sourceType: string, notes?: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .insert({
-      source_type: sourceType,
+  const db = getDb();
+  const id = createId();
+  const now = nowIso();
+  db.insert(importRuns)
+    .values({
+      id,
+      sourceType,
       status: "running",
       notes: notes ?? null,
-      started_at: new Date().toISOString(),
+      startedAt: now,
+      createdAt: now,
+      updatedAt: now,
     })
-    .select("id")
-    .single();
-
-  if (error || !data) {
-    throw new Error(`Unable to create import run: ${error?.message ?? "unknown error"}`);
-  }
-
-  return data.id as string;
+    .run();
+  return id;
 }
 
 export async function completeImportRun(input: {
@@ -265,21 +211,19 @@ export async function completeImportRun(input: {
   totalProcessed: number;
   notes?: string;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
-    .from("import_runs")
-    .update({
+  const db = getDb();
+  const now = nowIso();
+  db.update(importRuns)
+    .set({
       status: input.status,
-      total_found: input.totalFound,
-      total_processed: input.totalProcessed,
+      totalFound: input.totalFound,
+      totalProcessed: input.totalProcessed,
       notes: input.notes ?? null,
-      completed_at: new Date().toISOString(),
+      completedAt: now,
+      updatedAt: now,
     })
-    .eq("id", input.id);
-
-  if (error) {
-    throw new Error(`Unable to complete import run: ${error.message}`);
-  }
+    .where(eq(importRuns.id, input.id))
+    .run();
 }
 
 export async function upsertInvestigation(input: {
@@ -287,81 +231,78 @@ export async function upsertInvestigation(input: {
   normalizedBid: NormalizedBidData;
   diagnosis: DiagnosisResult;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
+  const existing = await getBidInvestigationRowByBidId(input.normalizedBid.bidId);
+  const investigationId = existing?.id ?? createId();
 
   const rowToPersist = {
-    import_run_id: input.importRunId,
-    bid_id: input.normalizedBid.bidId,
-    bid_dt: input.normalizedBid.bidDt,
-    campaign_name: input.normalizedBid.campaignName,
-    campaign_id: input.normalizedBid.campaignId,
-    publisher_name: input.normalizedBid.publisherName,
-    publisher_id: input.normalizedBid.publisherId,
-    target_name: input.normalizedBid.targetName,
-    target_id: input.normalizedBid.targetId,
-    buyer_name: input.normalizedBid.buyerName,
-    buyer_id: input.normalizedBid.buyerId,
-    bid_amount: input.normalizedBid.bidAmount,
-    winning_bid: input.normalizedBid.winningBid,
-    is_zero_bid: input.normalizedBid.isZeroBid,
-    reason_for_reject: input.normalizedBid.reasonForReject,
-    http_status_code: input.normalizedBid.httpStatusCode,
-    parsed_error_message: input.normalizedBid.errorMessage,
-    request_body: input.normalizedBid.requestBody,
-    response_body: input.normalizedBid.responseBody,
-    raw_trace_json: input.normalizedBid.rawTraceJson,
+    id: investigationId,
+    importRunId: input.importRunId,
+    bidId: input.normalizedBid.bidId,
+    bidDt: input.normalizedBid.bidDt,
+    campaignName: input.normalizedBid.campaignName,
+    campaignId: input.normalizedBid.campaignId,
+    publisherName: input.normalizedBid.publisherName,
+    publisherId: input.normalizedBid.publisherId,
+    targetName: input.normalizedBid.targetName,
+    targetId: input.normalizedBid.targetId,
+    buyerName: input.normalizedBid.buyerName,
+    buyerId: input.normalizedBid.buyerId,
+    bidAmount: input.normalizedBid.bidAmount,
+    winningBid: input.normalizedBid.winningBid,
+    isZeroBid: input.normalizedBid.isZeroBid,
+    reasonForReject: input.normalizedBid.reasonForReject,
+    httpStatusCode: input.normalizedBid.httpStatusCode,
+    parsedErrorMessage: input.normalizedBid.errorMessage,
+    requestBody: input.normalizedBid.requestBody,
+    responseBody: input.normalizedBid.responseBody,
+    rawTraceJson: input.normalizedBid.rawTraceJson,
     outcome: input.normalizedBid.outcome,
-    root_cause: input.diagnosis.rootCause,
-    root_cause_confidence: input.diagnosis.confidence,
+    rootCause: input.diagnosis.rootCause,
+    rootCauseConfidence: input.diagnosis.confidence,
     severity: input.diagnosis.severity,
-    owner_type: input.diagnosis.ownerType,
-    suggested_fix: input.diagnosis.suggestedFix,
+    ownerType: input.diagnosis.ownerType,
+    suggestedFix: input.diagnosis.suggestedFix,
     explanation: input.diagnosis.explanation,
-    evidence_json: input.diagnosis.evidence,
-    fetch_status: "fetched" as const,
-    fetched_at: new Date().toISOString(),
-    last_error: null,
-    lease_expires_at: null,
-    imported_at: new Date().toISOString(),
+    evidenceJson: input.diagnosis.evidence,
+    fetchStatus: "fetched" as const,
+    fetchedAt: now,
+    lastError: null,
+    leaseExpiresAt: null,
+    importedAt: now,
+    updatedAt: now,
+    createdAt: existing?.createdAt ?? now,
   };
 
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .upsert(rowToPersist, {
-      onConflict: "bid_id",
-    })
-    .select("*")
-    .single();
-
-  if (error || !data) {
-    throw new Error(`Unable to upsert investigation: ${error?.message ?? "unknown error"}`);
+  if (existing) {
+    db.update(bidInvestigations)
+      .set(rowToPersist)
+      .where(eq(bidInvestigations.id, existing.id))
+      .run();
+  } else {
+    db.insert(bidInvestigations).values(rowToPersist).run();
   }
 
-  const investigationId = (data as BidInvestigationRow).id;
-
-  const { error: deleteEventsError } = await supabase
-    .from("bid_events")
-    .delete()
-    .eq("bid_investigation_id", investigationId);
-
-  if (deleteEventsError) {
-    throw new Error(`Unable to replace investigation events: ${deleteEventsError.message}`);
-  }
+  db.delete(bidEvents)
+    .where(eq(bidEvents.bidInvestigationId, investigationId))
+    .run();
 
   if (input.normalizedBid.relevantEvents.length > 0) {
-    const { error: insertEventsError } = await supabase.from("bid_events").insert(
-      input.normalizedBid.relevantEvents.map((event) => ({
-        bid_investigation_id: investigationId,
-        event_name: event.eventName,
-        event_timestamp: event.eventTimestamp,
-        event_vals_json: event.eventValsJson,
-        event_str_vals_json: event.eventStrValsJson,
-      })),
-    );
-
-    if (insertEventsError) {
-      throw new Error(`Unable to insert investigation events: ${insertEventsError.message}`);
-    }
+    db.insert(bidEvents)
+      .values(
+        input.normalizedBid.relevantEvents.map((event) => ({
+          id: createId(),
+          bidInvestigationId: investigationId,
+          eventName: event.eventName,
+          eventTimestamp: event.eventTimestamp,
+          eventValsJson: event.eventValsJson,
+          eventStrValsJson: event.eventStrValsJson,
+          createdAt: now,
+          updatedAt: now,
+        })),
+      )
+      .run();
   }
 
   return getInvestigationByBidId(input.normalizedBid.bidId);
@@ -373,33 +314,114 @@ export async function claimInvestigationFetch(input: {
   forceRefresh: boolean;
   leaseSeconds?: number;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.rpc("claim_bid_investigation", {
-    p_bid_id: input.bidId,
-    p_import_run_id: input.importRunId,
-    p_force_refresh: input.forceRefresh,
-    p_lease_seconds: input.leaseSeconds ?? 120,
-  });
+  const db = getDb();
+  const sqlite = getSqlite();
+  const now = nowIso();
+  const leaseExpiresAt = addSeconds(now, input.leaseSeconds ?? 120);
+  const row = sqlite.transaction(() => {
+    const existing = db
+      .select()
+      .from(bidInvestigations)
+      .where(eq(bidInvestigations.bidId, input.bidId))
+      .get() as BidInvestigationRow | undefined;
 
-  if (error) {
-    throw new Error(`Unable to claim investigation fetch: ${error.message}`);
-  }
+    if (!existing) {
+      const created: typeof bidInvestigations.$inferInsert = {
+        id: createId(),
+        importRunId: input.importRunId,
+        bidId: input.bidId,
+        rawTraceJson: {},
+        evidenceJson: [],
+        fetchStatus: "pending",
+        fetchStartedAt: now,
+        refreshRequestedAt: input.forceRefresh ? now : null,
+        leaseExpiresAt,
+        fetchAttemptCount: 1,
+        importedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+      db.insert(bidInvestigations).values(created).run();
+      return {
+        id: created.id,
+        bidId: input.bidId,
+        fetchStatus: "pending" as FetchStatus,
+        shouldFetch: true,
+        fetchedAt: null,
+        lastError: null,
+        fetchAttemptCount: 1,
+        leaseExpiresAt,
+      } satisfies ClaimBidInvestigationRow;
+    }
 
-  const row = (data?.[0] ?? null) as ClaimBidInvestigationRow | null;
+    const activeLease = (() => {
+      const leaseMs = toTimestamp(existing.leaseExpiresAt);
+      const nowMs = toTimestamp(now);
+      return leaseMs !== null && nowMs !== null && leaseMs > nowMs;
+    })();
+    const hasReusableFetch = existing.fetchStatus === "fetched" && Boolean(existing.fetchedAt);
 
-  if (!row) {
-    throw new Error("Unable to claim investigation fetch: missing claim row.");
-  }
+    if (!input.forceRefresh && hasReusableFetch) {
+      return {
+        id: existing.id,
+        bidId: existing.bidId,
+        fetchStatus: existing.fetchStatus as FetchStatus,
+        shouldFetch: false,
+        fetchedAt: existing.fetchedAt,
+        lastError: existing.lastError,
+        fetchAttemptCount: existing.fetchAttemptCount,
+        leaseExpiresAt: existing.leaseExpiresAt,
+      } satisfies ClaimBidInvestigationRow;
+    }
+
+    if (!input.forceRefresh && existing.fetchStatus === "pending" && activeLease) {
+      return {
+        id: existing.id,
+        bidId: existing.bidId,
+        fetchStatus: existing.fetchStatus as FetchStatus,
+        shouldFetch: false,
+        fetchedAt: existing.fetchedAt,
+        lastError: existing.lastError,
+        fetchAttemptCount: existing.fetchAttemptCount,
+        leaseExpiresAt: existing.leaseExpiresAt,
+      } satisfies ClaimBidInvestigationRow;
+    }
+
+    db.update(bidInvestigations)
+      .set({
+        importRunId: input.importRunId,
+        fetchStatus: "pending",
+        fetchStartedAt: now,
+        refreshRequestedAt: input.forceRefresh ? now : existing.refreshRequestedAt,
+        leaseExpiresAt,
+        lastError: null,
+        updatedAt: now,
+        fetchAttemptCount: existing.fetchAttemptCount + 1,
+      })
+      .where(eq(bidInvestigations.id, existing.id))
+      .run();
+
+    return {
+      id: existing.id,
+      bidId: existing.bidId,
+      fetchStatus: "pending" as FetchStatus,
+      shouldFetch: true,
+      fetchedAt: existing.fetchedAt,
+      lastError: null,
+      fetchAttemptCount: existing.fetchAttemptCount + 1,
+      leaseExpiresAt,
+    } satisfies ClaimBidInvestigationRow;
+  })();
 
   return {
     id: row.id,
-    bidId: row.bid_id,
-    fetchStatus: row.fetch_status,
-    shouldFetch: row.should_fetch,
-    fetchedAt: row.fetched_at,
-    lastError: row.last_error,
-    fetchAttemptCount: row.fetch_attempt_count,
-    leaseExpiresAt: row.lease_expires_at,
+    bidId: row.bidId,
+    fetchStatus: row.fetchStatus,
+    shouldFetch: row.shouldFetch,
+    fetchedAt: row.fetchedAt,
+    lastError: row.lastError,
+    fetchAttemptCount: row.fetchAttemptCount,
+    leaseExpiresAt: row.leaseExpiresAt,
   };
 }
 
@@ -411,32 +433,34 @@ export async function markInvestigationFetchFailed(input: {
   responseBody?: Record<string, unknown> | string | null;
   rawTraceJson?: Record<string, unknown>;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const existing = await getBidInvestigationRowByBidId(input.bidId);
-  const shouldPreserveExistingData = Boolean(existing?.fetched_at);
+  const shouldPreserveExistingData = Boolean(existing?.fetchedAt);
   const updatePayload: Record<string, unknown> = {
-    import_run_id: input.importRunId,
-    fetch_status: "failed",
-    parsed_error_message: input.errorMessage,
-    last_error: input.errorMessage,
-    lease_expires_at: null,
-    imported_at: new Date().toISOString(),
+    importRunId: input.importRunId,
+    fetchStatus: "failed",
+    parsedErrorMessage: input.errorMessage,
+    lastError: input.errorMessage,
+    leaseExpiresAt: null,
+    importedAt: now,
+    updatedAt: now,
   };
 
   if (!shouldPreserveExistingData) {
-    updatePayload.http_status_code = input.httpStatusCode ?? null;
-    updatePayload.response_body = input.responseBody ?? null;
-    updatePayload.raw_trace_json = input.rawTraceJson ?? {};
+    updatePayload.httpStatusCode = input.httpStatusCode ?? null;
+    updatePayload.responseBody = input.responseBody ?? null;
+    updatePayload.rawTraceJson = input.rawTraceJson ?? {};
     updatePayload.outcome = "unknown";
-    updatePayload.root_cause = "unknown_needs_review";
-    updatePayload.root_cause_confidence = 0.2;
+    updatePayload.rootCause = "unknown_needs_review";
+    updatePayload.rootCauseConfidence = 0.2;
     updatePayload.severity = "high";
-    updatePayload.owner_type = "system";
-    updatePayload.suggested_fix =
+    updatePayload.ownerType = "system";
+    updatePayload.suggestedFix =
       "Retry the fetch or inspect Ringba credentials, connectivity, and upstream API availability.";
     updatePayload.explanation =
       "The investigation could not complete because the Ringba bid detail fetch failed before normalization finished.";
-    updatePayload.evidence_json = [
+    updatePayload.evidenceJson = [
       {
         field: "last_error",
         value: input.errorMessage,
@@ -445,16 +469,98 @@ export async function markInvestigationFetchFailed(input: {
     ] as DiagnosisResult["evidence"];
   }
 
-  const { error } = await supabase
-    .from("bid_investigations")
-    .update(updatePayload)
-    .eq("bid_id", input.bidId);
-
-  if (error) {
-    throw new Error(`Unable to mark fetch failure: ${error.message}`);
+  if (existing) {
+    db.update(bidInvestigations)
+      .set(updatePayload)
+      .where(eq(bidInvestigations.id, existing.id))
+      .run();
+  } else {
+    db.insert(bidInvestigations)
+      .values({
+        id: createId(),
+        bidId: input.bidId,
+        fetchStatus: "failed",
+        parsedErrorMessage: input.errorMessage,
+        lastError: input.errorMessage,
+        importRunId: input.importRunId,
+        httpStatusCode: input.httpStatusCode ?? null,
+        responseBody: input.responseBody ?? null,
+        rawTraceJson: input.rawTraceJson ?? {},
+        outcome: "unknown",
+        rootCause: "unknown_needs_review",
+        rootCauseConfidence: 0.2,
+        severity: "high",
+        ownerType: "system",
+        suggestedFix:
+          "Retry the fetch or inspect Ringba credentials, connectivity, and upstream API availability.",
+        explanation:
+          "The investigation could not complete because the Ringba bid detail fetch failed before normalization finished.",
+        evidenceJson: [
+          {
+            field: "last_error",
+            value: input.errorMessage,
+            description: "Ringba fetch failure captured by the persistence layer.",
+          },
+        ],
+        leaseExpiresAt: null,
+        importedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
   }
 
   return getInvestigationByBidId(input.bidId);
+}
+
+function sortInvestigations(rows: BidInvestigationRow[]) {
+  return [...rows].sort((left, right) => {
+    const leftPrimary = left.bidDt ?? left.importedAt;
+    const rightPrimary = right.bidDt ?? right.importedAt;
+    if (leftPrimary !== rightPrimary) {
+      return rightPrimary.localeCompare(leftPrimary);
+    }
+    return right.importedAt.localeCompare(left.importedAt);
+  });
+}
+
+function matchesSearch(row: BidInvestigationRow, search: string | undefined) {
+  const sanitized = search ? sanitizeSearch(search).toLowerCase() : "";
+  if (!sanitized) {
+    return true;
+  }
+
+  const values = [
+    row.bidId,
+    row.campaignName,
+    row.publisherName,
+    row.targetName,
+  ];
+
+  return values.some((value) => value?.toLowerCase().includes(sanitized));
+}
+
+async function listFilteredInvestigations(input: {
+  rootCause?: string;
+  ownerType?: string;
+  search?: string;
+}) {
+  const db = getDb();
+  const rows = db.select().from(bidInvestigations).all() as BidInvestigationRow[];
+
+  return sortInvestigations(
+    rows.filter((row) => {
+      if (input.rootCause && row.rootCause !== input.rootCause) {
+        return false;
+      }
+
+      if (input.ownerType && row.ownerType !== input.ownerType) {
+        return false;
+      }
+
+      return matchesSearch(row, input.search);
+    }),
+  );
 }
 
 export async function getInvestigations(input: {
@@ -464,101 +570,45 @@ export async function getInvestigations(input: {
   ownerType?: string;
   search?: string;
 }): Promise<InvestigationsPageData> {
-  const supabase = getSupabaseAdminClient();
   const from = (input.page - 1) * input.pageSize;
-  const to = from + input.pageSize - 1;
-
-  let query = supabase
-    .from("bid_investigations")
-    .select("*", { count: "exact" })
-    .order("bid_dt", { ascending: false, nullsFirst: false })
-    .order("imported_at", { ascending: false })
-    .range(from, to);
-
-  if (input.rootCause) {
-    query = query.eq("root_cause", input.rootCause);
-  }
-
-  if (input.ownerType) {
-    query = query.eq("owner_type", input.ownerType);
-  }
-
-  if (input.search) {
-    const search = sanitizeSearch(input.search);
-    if (search) {
-      query = query.or(
-        [
-          `bid_id.ilike.%${search}%`,
-          `campaign_name.ilike.%${search}%`,
-          `publisher_name.ilike.%${search}%`,
-          `target_name.ilike.%${search}%`,
-        ].join(","),
-      );
-    }
-  }
-
-  const { data, error, count } = await query;
-
-  if (error) {
-    throw new Error(`Unable to fetch investigations: ${error.message}`);
-  }
-
-  const rows = (data ?? []) as BidInvestigationRow[];
+  const rows = await listFilteredInvestigations(input);
 
   return {
-    items: rows.map(toListItem),
-    total: count ?? rows.length,
+    items: rows.slice(from, from + input.pageSize).map(toListItem),
+    total: rows.length,
     page: input.page,
     pageSize: input.pageSize,
   };
 }
 
 export async function getInvestigationByBidId(bidId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .select("*")
-    .eq("bid_id", bidId)
-    .single();
+  const db = getDb();
+  const investigation = await getBidInvestigationRowByBidId(bidId);
 
-  if (error) {
-    if (error.code === "PGRST116") {
-      return null;
+  if (!investigation) {
+    return null;
+  }
+
+  const eventData = db
+    .select()
+    .from(bidEvents)
+    .where(eq(bidEvents.bidInvestigationId, investigation.id))
+    .all() as BidEventRow[];
+
+  eventData.sort((left, right) => {
+    const leftPrimary = left.eventTimestamp ?? left.createdAt;
+    const rightPrimary = right.eventTimestamp ?? right.createdAt;
+    if (leftPrimary !== rightPrimary) {
+      return leftPrimary.localeCompare(rightPrimary);
     }
+    return left.createdAt.localeCompare(right.createdAt);
+  });
 
-    throw new Error(`Unable to fetch investigation detail: ${error.message}`);
-  }
-
-  const investigation = data as BidInvestigationRow;
-
-  const { data: eventData, error: eventError } = await supabase
-    .from("bid_events")
-    .select("*")
-    .eq("bid_investigation_id", investigation.id)
-    .order("event_timestamp", { ascending: true, nullsFirst: false })
-    .order("created_at", { ascending: true });
-
-  if (eventError) {
-    throw new Error(`Unable to fetch investigation events: ${eventError.message}`);
-  }
-
-  return toDetail(investigation, (eventData ?? []) as BidEventRow[]);
+  return toDetail(investigation, eventData);
 }
 
 export async function getDashboardStats(): Promise<DashboardStats> {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .select("*")
-    .order("bid_dt", { ascending: false, nullsFirst: false })
-    .order("imported_at", { ascending: false })
-    .limit(1000);
-
-  if (error) {
-    throw new Error(`Unable to fetch dashboard stats: ${error.message}`);
-  }
-
-  const rows = (data ?? []) as BidInvestigationRow[];
+  const rows = (await listFilteredInvestigations({})).slice(0, 1000);
   const rootCauseCounts = new Map<string, number>();
   const campaignCounts = new Map<string, number>();
   const publisherCounts = new Map<string, number>();
@@ -570,10 +620,10 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   let zeroBidCount = 0;
 
   for (const row of rows) {
-    incrementMetric(rootCauseCounts, row.root_cause);
-    incrementMetric(campaignCounts, row.campaign_name);
-    incrementMetric(publisherCounts, row.publisher_name);
-    incrementMetric(targetCounts, row.target_name);
+    incrementMetric(rootCauseCounts, row.rootCause);
+    incrementMetric(campaignCounts, row.campaignName);
+    incrementMetric(publisherCounts, row.publisherName);
+    incrementMetric(targetCounts, row.targetName);
     incrementMetric(outcomeCounts, row.outcome);
 
     if (row.outcome === "accepted") {
@@ -608,33 +658,7 @@ export async function getInvestigationsForExport(input: {
   ownerType?: string;
   search?: string;
 }) {
-  const result = await getInvestigations({
-    page: 1,
-    pageSize: 1000,
-    rootCause: input.rootCause,
-    ownerType: input.ownerType,
-    search: input.search,
-  });
-
-  const supabase = getSupabaseAdminClient();
-  const bidIds = result.items.map((item) => item.bidId);
-
-  if (bidIds.length === 0) {
-    return [];
-  }
-
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .select("*")
-    .in("bid_id", bidIds)
-    .order("bid_dt", { ascending: false, nullsFirst: false })
-    .order("imported_at", { ascending: false });
-
-  if (error) {
-    throw new Error(`Unable to fetch export rows: ${error.message}`);
-  }
-
-  return (data ?? []) as BidInvestigationRow[];
+  return listFilteredInvestigations(input);
 }
 
 export async function getInvestigationListItemsByIds(ids: string[]) {
@@ -644,15 +668,12 @@ export async function getInvestigationListItemsByIds(ids: string[]) {
     return [];
   }
 
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("bid_investigations")
-    .select("*")
-    .in("id", uniqueIds);
+  const db = getDb();
+  const rows = db
+    .select()
+    .from(bidInvestigations)
+    .where(inArray(bidInvestigations.id, uniqueIds))
+    .all() as BidInvestigationRow[];
 
-  if (error) {
-    throw new Error(`Unable to fetch investigation list items by ids: ${error.message}`);
-  }
-
-  return ((data ?? []) as BidInvestigationRow[]).map(toListItem);
+  return rows.map(toListItem);
 }

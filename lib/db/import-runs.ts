@@ -1,7 +1,23 @@
 import "server-only";
 
+import { eq, inArray } from "drizzle-orm";
+
+import { getDb, getSqlite } from "@/lib/db/client";
 import { getInvestigationListItemsByIds } from "@/lib/db/investigations";
-import { getSupabaseAdminClient } from "@/lib/db/server";
+import {
+  importRunItems,
+  importRuns,
+  importSourceCheckpoints,
+  type ImportRunItemRow,
+  type ImportRunRow,
+  type ImportSourceCheckpointRow,
+} from "@/lib/db/schema";
+import {
+  addSeconds,
+  createId,
+  nowIso,
+  toTimestamp,
+} from "@/lib/db/utils";
 import type { InvestigationListItem } from "@/types/bid";
 import type {
   ImportRunDetail,
@@ -11,73 +27,6 @@ import type {
   ImportRunSourceStage,
   ImportRunStatus,
 } from "@/types/import-run";
-
-interface ImportRunRow {
-  id: string;
-  source_type: string;
-  trigger_type: "manual" | "scheduled";
-  schedule_id: string | null;
-  source_stage: ImportRunSourceStage;
-  status: ImportRunStatus;
-  force_refresh: boolean;
-  notes: string | null;
-  last_error: string | null;
-  total_found: number;
-  total_processed: number;
-  source_window_start: string | null;
-  source_window_end: string | null;
-  export_job_id: string | null;
-  export_row_count: number;
-  export_download_status: ImportRunExportDownloadStatus | null;
-  source_metadata: Record<string, unknown> | null;
-  started_at: string | null;
-  completed_at: string | null;
-  processor_lease_expires_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ImportRunItemRow {
-  id: string;
-  import_run_id: string;
-  bid_id: string;
-  position: number;
-  status: ImportRunItemStatus;
-  resolution: ImportRunItemResolution | null;
-  error_message: string | null;
-  investigation_id: string | null;
-  started_at: string | null;
-  completed_at: string | null;
-  attempt_count: number;
-  lease_expires_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-interface ClaimedImportRunRow {
-  id: string;
-  status: ImportRunStatus;
-  should_process: boolean;
-  force_refresh: boolean;
-  total_items: number;
-  total_processed: number;
-  last_error: string | null;
-}
-
-interface ClaimedImportRunItemRow {
-  id: string;
-  bid_id: string;
-  position: number;
-}
-
-interface ImportSourceCheckpointRow {
-  source_key: string;
-  source_type: string;
-  last_successful_bid_dt: string | null;
-  source_metadata: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-}
 
 function dedupeBidIds(bidIds: string[]) {
   const values: string[] = [];
@@ -176,56 +125,45 @@ function mapImportRunItem(
 ) {
   return {
     id: row.id,
-    importRunId: row.import_run_id,
-    bidId: row.bid_id,
+    importRunId: row.importRunId,
+    bidId: row.bidId,
     position: row.position,
-    status: row.status,
-    resolution: row.resolution,
-    errorMessage: row.error_message,
-    investigationId: row.investigation_id,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    attemptCount: row.attempt_count,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    investigation: row.investigation_id
-      ? investigationsById.get(row.investigation_id) ?? null
+    status: row.status as ImportRunItemStatus,
+    resolution: row.resolution as ImportRunItemResolution | null,
+    errorMessage: row.errorMessage,
+    investigationId: row.investigationId,
+    startedAt: row.startedAt,
+    completedAt: row.completedAt,
+    attemptCount: row.attemptCount,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    investigation: row.investigationId
+      ? investigationsById.get(row.investigationId) ?? null
       : null,
   };
 }
 
 async function getImportRunRow(importRunId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_runs")
-    .select("*")
-    .eq("id", importRunId)
-    .single();
+  const db = getDb();
+  const row = db
+    .select()
+    .from(importRuns)
+    .where(eq(importRuns.id, importRunId))
+    .get() as ImportRunRow | undefined;
 
-  if (error) {
-    if (error.code === "PGRST116") {
-      return null;
-    }
-
-    throw new Error(`Unable to fetch import run: ${error.message}`);
-  }
-
-  return data as ImportRunRow;
+  return row ?? null;
 }
 
 async function getImportRunItemRows(importRunId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_run_items")
-    .select("*")
-    .eq("import_run_id", importRunId)
-    .order("position", { ascending: true });
+  const db = getDb();
+  const rows = db
+    .select()
+    .from(importRunItems)
+    .where(eq(importRunItems.importRunId, importRunId))
+    .all() as ImportRunItemRow[];
 
-  if (error) {
-    throw new Error(`Unable to fetch import run items: ${error.message}`);
-  }
-
-  return (data ?? []) as ImportRunItemRow[];
+  rows.sort((left, right) => left.position - right.position);
+  return rows;
 }
 
 function splitIntoChunks(values: string[], chunkSize: number) {
@@ -239,21 +177,11 @@ function splitIntoChunks(values: string[], chunkSize: number) {
 }
 
 async function getImportRunItemBidIds(importRunId: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_run_items")
-    .select("bid_id, position")
-    .eq("import_run_id", importRunId)
-    .order("position", { ascending: true });
-
-  if (error) {
-    throw new Error(`Unable to fetch import run item ids: ${error.message}`);
-  }
-
-  return (data ?? []) as Array<{
-    bid_id: string;
-    position: number;
-  }>;
+  const rows = await getImportRunItemRows(importRunId);
+  return rows.map((row) => ({
+    bidId: row.bidId,
+    position: row.position,
+  }));
 }
 
 async function insertImportRunItems(input: {
@@ -261,7 +189,7 @@ async function insertImportRunItems(input: {
   bidIds: string[];
 }) {
   const existingRows = await getImportRunItemBidIds(input.importRunId);
-  const existingBidIds = new Set(existingRows.map((row) => row.bid_id));
+  const existingBidIds = new Set(existingRows.map((row) => row.bidId));
   const valuesToInsert = input.bidIds.filter((bidId) => !existingBidIds.has(bidId));
 
   if (valuesToInsert.length === 0) {
@@ -271,27 +199,27 @@ async function insertImportRunItems(input: {
     };
   }
 
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const chunks = splitIntoChunks(valuesToInsert, 1000);
   let currentPosition = existingRows.length + 1;
 
   for (const chunk of chunks) {
     const rows = chunk.map((bidId) => {
       const row = {
-        import_run_id: input.importRunId,
-        bid_id: bidId,
+        id: createId(),
+        importRunId: input.importRunId,
+        bidId,
         position: currentPosition,
-        status: "queued",
+        status: "queued" as ImportRunItemStatus,
+        createdAt: now,
+        updatedAt: now,
       };
       currentPosition += 1;
       return row;
     });
 
-    const { error } = await supabase.from("import_run_items").insert(rows);
-
-    if (error) {
-      throw new Error(`Unable to create import run items: ${error.message}`);
-    }
+    db.insert(importRunItems).values(rows).run();
   }
 
   return {
@@ -316,64 +244,55 @@ export async function createImportRun(input: {
   sourceMetadata?: Record<string, unknown>;
 }) {
   const bidIds = dedupeBidIds(input.bidIds ?? []);
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const sqlite = getSqlite();
+  const now = nowIso();
+  const runId = createId();
 
-  const { data, error } = await supabase
-    .from("import_runs")
-    .insert({
-      source_type: input.sourceType,
-      trigger_type: input.triggerType ?? "manual",
-      schedule_id: input.scheduleId ?? null,
-      source_stage: input.sourceStage ?? "queued",
-      status: "queued",
-      force_refresh: input.forceRefresh,
-      notes: input.notes ?? null,
-      total_found: bidIds.length,
-      total_processed: 0,
-      source_window_start: input.sourceWindowStart ?? null,
-      source_window_end: input.sourceWindowEnd ?? null,
-      export_job_id: input.exportJobId ?? null,
-      export_row_count: input.exportRowCount ?? 0,
-      export_download_status: input.exportDownloadStatus ?? null,
-      source_metadata: input.sourceMetadata ?? {},
-      started_at: new Date().toISOString(),
-    })
-    .select("*")
-    .single();
+  sqlite.transaction(() => {
+    db.insert(importRuns)
+      .values({
+        id: runId,
+        sourceType: input.sourceType,
+        triggerType: input.triggerType ?? "manual",
+        scheduleId: input.scheduleId ?? null,
+        sourceStage: input.sourceStage ?? "queued",
+        status: "queued",
+        forceRefresh: input.forceRefresh,
+        notes: input.notes ?? null,
+        totalFound: bidIds.length,
+        totalProcessed: 0,
+        sourceWindowStart: input.sourceWindowStart ?? null,
+        sourceWindowEnd: input.sourceWindowEnd ?? null,
+        exportJobId: input.exportJobId ?? null,
+        exportRowCount: input.exportRowCount ?? 0,
+        exportDownloadStatus: input.exportDownloadStatus ?? null,
+        sourceMetadata: input.sourceMetadata ?? {},
+        startedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
 
-  if (error || !data) {
-    throw new Error(`Unable to create import run: ${error?.message ?? "unknown error"}`);
-  }
-
-  const run = data as ImportRunRow;
-
-  if (bidIds.length > 0) {
-    try {
-      await insertImportRunItems({
-        importRunId: run.id,
-        bidIds,
-      });
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Unable to create import run items.";
-
-      await supabase
-        .from("import_runs")
-        .update({
-          status: "failed",
-          source_stage: "failed",
-          export_download_status:
-            input.exportDownloadStatus == null ? null : "failed",
-          last_error: message,
-          completed_at: new Date().toISOString(),
-        })
-        .eq("id", run.id);
-
-      throw new Error(message);
+    if (bidIds.length > 0) {
+      let position = 1;
+      db.insert(importRunItems)
+        .values(
+          bidIds.map((bidId) => ({
+            id: createId(),
+            importRunId: runId,
+            bidId,
+            position: position++,
+            status: "queued",
+            createdAt: now,
+            updatedAt: now,
+          })),
+        )
+        .run();
     }
-  }
+  })();
 
-  return run.id;
+  return runId;
 }
 
 export async function getImportRunDetail(importRunId: string): Promise<ImportRunDetail | null> {
@@ -385,7 +304,7 @@ export async function getImportRunDetail(importRunId: string): Promise<ImportRun
 
   const itemRows = await getImportRunItemRows(importRunId);
   const investigationIds = itemRows
-    .map((item) => item.investigation_id)
+    .map((item) => item.investigationId)
     .filter((value): value is string => Boolean(value));
   const investigations = await getInvestigationListItemsByIds(investigationIds);
   const investigationsById = new Map(
@@ -395,24 +314,26 @@ export async function getImportRunDetail(importRunId: string): Promise<ImportRun
 
   return {
     id: run.id,
-    sourceType: run.source_type,
-    triggerType: run.trigger_type,
-    scheduleId: run.schedule_id,
-    sourceStage: run.source_stage,
-    status: run.status,
-    forceRefresh: run.force_refresh,
+    sourceType: run.sourceType,
+    triggerType: run.triggerType as "manual" | "scheduled",
+    scheduleId: run.scheduleId,
+    sourceStage: run.sourceStage as ImportRunSourceStage,
+    status: run.status as ImportRunStatus,
+    forceRefresh: run.forceRefresh,
     notes: run.notes,
-    lastError: run.last_error,
-    sourceWindowStart: run.source_window_start,
-    sourceWindowEnd: run.source_window_end,
-    exportJobId: run.export_job_id,
-    exportRowCount: run.export_row_count,
-    exportDownloadStatus: run.export_download_status,
-    sourceMetadata: normalizeSourceMetadata(run.source_metadata),
-    startedAt: run.started_at,
-    completedAt: run.completed_at,
-    createdAt: run.created_at,
-    updatedAt: run.updated_at,
+    lastError: run.lastError,
+    sourceWindowStart: run.sourceWindowStart,
+    sourceWindowEnd: run.sourceWindowEnd,
+    exportJobId: run.exportJobId,
+    exportRowCount: run.exportRowCount,
+    exportDownloadStatus: run.exportDownloadStatus as ImportRunExportDownloadStatus | null,
+    sourceMetadata: normalizeSourceMetadata(
+      (run.sourceMetadata ?? null) as Record<string, unknown> | null,
+    ),
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
     ...progress,
     items: itemRows.map((item) => mapImportRunItem(item, investigationsById)),
   };
@@ -432,7 +353,8 @@ export async function updateImportRunSourceState(input: {
   completedAt?: string | null;
   allowSourceStageRegression?: boolean;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const updateData: Record<string, unknown> = {};
   const currentRun = await getImportRunRow(input.importRunId);
 
@@ -456,50 +378,44 @@ export async function updateImportRunSourceState(input: {
     updateData.status = input.status;
   }
   if (input.sourceStage !== undefined) {
-    const currentStageOrder = sourceStageOrder[currentRun.source_stage];
+    const currentStageOrder = sourceStageOrder[currentRun.sourceStage as ImportRunSourceStage];
     const nextStageOrder = sourceStageOrder[input.sourceStage];
     const shouldAdvanceStage =
       input.allowSourceStageRegression === true ||
-      currentRun.source_stage === input.sourceStage ||
+      currentRun.sourceStage === input.sourceStage ||
       nextStageOrder >= currentStageOrder;
 
     if (shouldAdvanceStage) {
-      updateData.source_stage = input.sourceStage;
+      updateData.sourceStage = input.sourceStage;
     }
   }
   if (input.sourceWindowStart !== undefined) {
-    updateData.source_window_start = input.sourceWindowStart;
+    updateData.sourceWindowStart = input.sourceWindowStart;
   }
   if (input.sourceWindowEnd !== undefined) {
-    updateData.source_window_end = input.sourceWindowEnd;
+    updateData.sourceWindowEnd = input.sourceWindowEnd;
   }
   if (input.exportJobId !== undefined) {
-    updateData.export_job_id = input.exportJobId;
+    updateData.exportJobId = input.exportJobId;
   }
   if (input.exportRowCount !== undefined) {
-    updateData.export_row_count = input.exportRowCount;
+    updateData.exportRowCount = input.exportRowCount;
   }
   if (input.exportDownloadStatus !== undefined) {
-    updateData.export_download_status = input.exportDownloadStatus;
+    updateData.exportDownloadStatus = input.exportDownloadStatus;
   }
   if (input.sourceMetadata !== undefined) {
-    updateData.source_metadata = input.sourceMetadata;
+    updateData.sourceMetadata = input.sourceMetadata;
   }
   if (input.lastError !== undefined) {
-    updateData.last_error = input.lastError;
+    updateData.lastError = input.lastError;
   }
   if (input.completedAt !== undefined) {
-    updateData.completed_at = input.completedAt;
+    updateData.completedAt = input.completedAt;
   }
+  updateData.updatedAt = now;
 
-  const { error } = await supabase
-    .from("import_runs")
-    .update(updateData)
-    .eq("id", input.importRunId);
-
-  if (error) {
-    throw new Error(`Unable to update import run source state: ${error.message}`);
-  }
+  db.update(importRuns).set(updateData).where(eq(importRuns.id, input.importRunId)).run();
 
   return getImportRunDetail(input.importRunId);
 }
@@ -513,7 +429,8 @@ export async function addImportRunItems(input: {
   sourceMetadata?: Record<string, unknown>;
 }) {
   const bidIds = dedupeBidIds(input.bidIds);
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   let insertedCount = 0;
 
   if (bidIds.length > 0) {
@@ -524,21 +441,19 @@ export async function addImportRunItems(input: {
     insertedCount = result.insertedCount;
   }
 
-  const { error } = await supabase
-    .from("import_runs")
-    .update({
-      total_found: bidIds.length,
-      source_stage: input.sourceStage ?? "queued",
-      export_row_count: input.exportRowCount ?? bidIds.length,
-      export_download_status: input.exportDownloadStatus ?? "parsed",
-      source_metadata: input.sourceMetadata ?? {},
-      last_error: null,
+  const allItems = await getImportRunItemRows(input.importRunId);
+  db.update(importRuns)
+    .set({
+      totalFound: allItems.length,
+      sourceStage: input.sourceStage ?? "queued",
+      exportRowCount: input.exportRowCount ?? allItems.length,
+      exportDownloadStatus: input.exportDownloadStatus ?? "parsed",
+      sourceMetadata: input.sourceMetadata ?? {},
+      lastError: null,
+      updatedAt: now,
     })
-    .eq("id", input.importRunId);
-
-  if (error) {
-    throw new Error(`Unable to update import run after item creation: ${error.message}`);
-  }
+    .where(eq(importRuns.id, input.importRunId))
+    .run();
 
   const detail = await getImportRunDetail(input.importRunId);
 
@@ -553,22 +468,13 @@ export async function addImportRunItems(input: {
 }
 
 export async function getImportSourceCheckpoint(sourceKey: string) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase
-    .from("import_source_checkpoints")
-    .select("*")
-    .eq("source_key", sourceKey)
-    .single();
-
-  if (error) {
-    if (error.code === "PGRST116") {
-      return null;
-    }
-
-    throw new Error(`Unable to fetch import source checkpoint: ${error.message}`);
-  }
-
-  return data as ImportSourceCheckpointRow;
+  const db = getDb();
+  const row = db
+    .select()
+    .from(importSourceCheckpoints)
+    .where(eq(importSourceCheckpoints.sourceKey, sourceKey))
+    .get() as ImportSourceCheckpointRow | undefined;
+  return row ?? null;
 }
 
 export async function upsertImportSourceCheckpoint(input: {
@@ -577,21 +483,31 @@ export async function upsertImportSourceCheckpoint(input: {
   lastSuccessfulBidDt: string | null;
   sourceMetadata?: Record<string, unknown>;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase.from("import_source_checkpoints").upsert(
-    {
-      source_key: input.sourceKey,
-      source_type: input.sourceType,
-      last_successful_bid_dt: input.lastSuccessfulBidDt,
-      source_metadata: input.sourceMetadata ?? {},
-    },
-    {
-      onConflict: "source_key",
-    },
-  );
+  const db = getDb();
+  const now = nowIso();
+  const existing = await getImportSourceCheckpoint(input.sourceKey);
 
-  if (error) {
-    throw new Error(`Unable to upsert import source checkpoint: ${error.message}`);
+  if (existing) {
+    db.update(importSourceCheckpoints)
+      .set({
+        sourceType: input.sourceType,
+        lastSuccessfulBidDt: input.lastSuccessfulBidDt,
+        sourceMetadata: input.sourceMetadata ?? {},
+        updatedAt: now,
+      })
+      .where(eq(importSourceCheckpoints.sourceKey, input.sourceKey))
+      .run();
+  } else {
+    db.insert(importSourceCheckpoints)
+      .values({
+        sourceKey: input.sourceKey,
+        sourceType: input.sourceType,
+        lastSuccessfulBidDt: input.lastSuccessfulBidDt,
+        sourceMetadata: input.sourceMetadata ?? {},
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
   }
 }
 
@@ -599,30 +515,83 @@ export async function claimImportRunProcessing(input: {
   importRunId: string;
   leaseSeconds?: number;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.rpc("claim_import_run_processing", {
-    p_import_run_id: input.importRunId,
-    p_lease_seconds: input.leaseSeconds ?? 60,
-  });
+  const db = getDb();
+  const sqlite = getSqlite();
+  const now = nowIso();
+  const leaseExpiresAt = addSeconds(now, input.leaseSeconds ?? 60);
+  const row = sqlite.transaction(() => {
+    const run = db
+      .select()
+      .from(importRuns)
+      .where(eq(importRuns.id, input.importRunId))
+      .get() as ImportRunRow | undefined;
 
-  if (error) {
-    throw new Error(`Unable to claim import run processing: ${error.message}`);
-  }
+    if (!run) {
+      throw new Error(`Unable to claim import run processing: ${input.importRunId} not found.`);
+    }
 
-  const row = (data?.[0] ?? null) as ClaimedImportRunRow | null;
+    const terminalStatuses = new Set<ImportRunStatus>([
+      "completed",
+      "completed_with_errors",
+      "failed",
+      "cancelled",
+    ]);
+    const activeLease =
+      toTimestamp(run.processorLeaseExpiresAt) !== null &&
+      (toTimestamp(run.processorLeaseExpiresAt) as number) > (toTimestamp(now) as number);
+    const shouldProcess = !terminalStatuses.has(run.status as ImportRunStatus) && !activeLease;
+    const items = db
+      .select()
+      .from(importRunItems)
+      .where(eq(importRunItems.importRunId, input.importRunId))
+      .all() as ImportRunItemRow[];
+    const totalProcessed = items.filter((item) => {
+      return item.status === "completed" || item.status === "failed";
+    }).length;
 
-  if (!row) {
-    throw new Error("Unable to claim import run processing: missing claim row.");
-  }
+    if (shouldProcess) {
+      const hasAvailableItems = items.some((item) => {
+        const leaseMs = toTimestamp(item.leaseExpiresAt);
+        const nowMs = toTimestamp(now);
+        return (
+          item.status === "queued" ||
+          (item.status === "running" &&
+            leaseMs !== null &&
+            nowMs !== null &&
+            leaseMs <= nowMs)
+        );
+      });
+      db.update(importRuns)
+        .set({
+          status: "running",
+          sourceStage:
+            run.sourceStage === "queued" && hasAvailableItems ? "processing" : run.sourceStage,
+          processorLeaseExpiresAt: leaseExpiresAt,
+          updatedAt: now,
+        })
+        .where(eq(importRuns.id, run.id))
+        .run();
+    }
+
+    return {
+      id: run.id,
+      status: run.status as ImportRunStatus,
+      shouldProcess,
+      forceRefresh: run.forceRefresh,
+      totalItems: items.length,
+      totalProcessed,
+      lastError: run.lastError,
+    };
+  })();
 
   return {
     id: row.id,
-    status: row.status,
-    shouldProcess: row.should_process,
-    forceRefresh: row.force_refresh,
-    totalItems: row.total_items,
-    totalProcessed: row.total_processed,
-    lastError: row.last_error,
+    status: row.status as ImportRunStatus,
+    shouldProcess: row.shouldProcess,
+    forceRefresh: row.forceRefresh,
+    totalItems: row.totalItems,
+    totalProcessed: row.totalProcessed,
+    lastError: row.lastError,
   };
 }
 
@@ -631,22 +600,63 @@ export async function claimImportRunItems(input: {
   batchSize?: number;
   leaseSeconds?: number;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { data, error } = await supabase.rpc("claim_import_run_items", {
-    p_import_run_id: input.importRunId,
-    p_batch_size: input.batchSize ?? 10,
-    p_lease_seconds: input.leaseSeconds ?? 180,
-  });
+  const db = getDb();
+  const sqlite = getSqlite();
+  const now = nowIso();
+  const leaseExpiresAt = addSeconds(now, input.leaseSeconds ?? 180);
+  const batchSize = Math.max(1, input.batchSize ?? 10);
 
-  if (error) {
-    throw new Error(`Unable to claim import run items: ${error.message}`);
-  }
+  return sqlite.transaction(() => {
+    const rows = db
+      .select()
+      .from(importRunItems)
+      .where(eq(importRunItems.importRunId, input.importRunId))
+      .all() as ImportRunItemRow[];
+    const nowMs = toTimestamp(now) ?? 0;
 
-  return ((data ?? []) as ClaimedImportRunItemRow[]).map((item) => ({
-    id: item.id,
-    bidId: item.bid_id,
-    position: item.position,
-  }));
+    for (const row of rows) {
+      const leaseMs = toTimestamp(row.leaseExpiresAt);
+      if (row.status === "running" && leaseMs !== null && leaseMs <= nowMs) {
+        db.update(importRunItems)
+          .set({
+            status: "queued",
+            leaseExpiresAt: null,
+            updatedAt: now,
+          })
+          .where(eq(importRunItems.id, row.id))
+          .run();
+      }
+    }
+
+    const available = db
+      .select()
+      .from(importRunItems)
+      .where(eq(importRunItems.importRunId, input.importRunId))
+      .all() as ImportRunItemRow[];
+    const claimed = available
+      .filter((row) => row.status === "queued")
+      .sort((left, right) => left.position - right.position)
+      .slice(0, batchSize);
+
+    for (const row of claimed) {
+      db.update(importRunItems)
+        .set({
+          status: "running",
+          startedAt: now,
+          leaseExpiresAt,
+          attemptCount: row.attemptCount + 1,
+          updatedAt: now,
+        })
+        .where(eq(importRunItems.id, row.id))
+        .run();
+    }
+
+    return claimed.map((item) => ({
+      id: item.id,
+      bidId: item.bidId,
+      position: item.position,
+    }));
+  })();
 }
 
 export async function completeImportRunItem(input: {
@@ -654,22 +664,20 @@ export async function completeImportRunItem(input: {
   resolution: Exclude<ImportRunItemResolution, "failed" | "skipped">;
   investigationId: string | null;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
-    .from("import_run_items")
-    .update({
+  const db = getDb();
+  const now = nowIso();
+  db.update(importRunItems)
+    .set({
       status: "completed",
       resolution: input.resolution,
-      error_message: null,
-      investigation_id: input.investigationId,
-      completed_at: new Date().toISOString(),
-      lease_expires_at: null,
+      errorMessage: null,
+      investigationId: input.investigationId,
+      completedAt: now,
+      leaseExpiresAt: null,
+      updatedAt: now,
     })
-    .eq("id", input.itemId);
-
-  if (error) {
-    throw new Error(`Unable to complete import run item: ${error.message}`);
-  }
+    .where(eq(importRunItems.id, input.itemId))
+    .run();
 }
 
 export async function failImportRunItem(input: {
@@ -677,26 +685,25 @@ export async function failImportRunItem(input: {
   investigationId: string | null;
   errorMessage: string;
 }) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
-    .from("import_run_items")
-    .update({
+  const db = getDb();
+  const now = nowIso();
+  db.update(importRunItems)
+    .set({
       status: "failed",
       resolution: "failed",
-      error_message: input.errorMessage,
-      investigation_id: input.investigationId,
-      completed_at: new Date().toISOString(),
-      lease_expires_at: null,
+      errorMessage: input.errorMessage,
+      investigationId: input.investigationId,
+      completedAt: now,
+      leaseExpiresAt: null,
+      updatedAt: now,
     })
-    .eq("id", input.itemId);
-
-  if (error) {
-    throw new Error(`Unable to fail import run item: ${error.message}`);
-  }
+    .where(eq(importRunItems.id, input.itemId))
+    .run();
 }
 
 export async function finalizeImportRun(importRunId: string) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const run = await getImportRunRow(importRunId);
 
   if (!run) {
@@ -707,7 +714,7 @@ export async function finalizeImportRun(importRunId: string) {
   const progress = calculateProgress(items);
   let nextStatus = deriveImportRunStatus(items);
 
-  if (items.length === 0 && run.source_stage === "queued") {
+  if (items.length === 0 && run.sourceStage === "queued") {
     nextStatus = "completed";
   }
 
@@ -716,47 +723,40 @@ export async function finalizeImportRun(importRunId: string) {
       ? ("completed" as const)
       : items.length > 0
         ? ("processing" as const)
-        : run.source_stage;
+        : (run.sourceStage as ImportRunSourceStage);
 
-  const { error } = await supabase
-    .from("import_runs")
-    .update({
+  db.update(importRuns)
+    .set({
       status: nextStatus,
-      source_stage: nextSourceStage,
-      total_found: progress.totalItems,
-      total_processed: progress.completedCount + progress.failedCount,
-      completed_at:
-        nextStatus === "completed" || nextStatus === "completed_with_errors"
-          ? new Date().toISOString()
-          : null,
-      processor_lease_expires_at: null,
+      sourceStage: nextSourceStage,
+      totalFound: progress.totalItems,
+      totalProcessed: progress.completedCount + progress.failedCount,
+      completedAt:
+        nextStatus === "completed" || nextStatus === "completed_with_errors" ? now : null,
+      processorLeaseExpiresAt: null,
+      updatedAt: now,
     })
-    .eq("id", importRunId);
-
-  if (error) {
-    throw new Error(`Unable to finalize import run: ${error.message}`);
-  }
+    .where(eq(importRuns.id, importRunId))
+    .run();
 
   return getImportRunDetail(importRunId);
 }
 
 export async function markImportRunFailed(importRunId: string, errorMessage: string) {
-  const supabase = getSupabaseAdminClient();
-  const { error } = await supabase
-    .from("import_runs")
-    .update({
+  const db = getDb();
+  const now = nowIso();
+  db.update(importRuns)
+    .set({
       status: "failed",
-      source_stage: "failed",
-      export_download_status: "failed",
-      last_error: errorMessage,
-      processor_lease_expires_at: null,
-      completed_at: new Date().toISOString(),
+      sourceStage: "failed",
+      exportDownloadStatus: "failed",
+      lastError: errorMessage,
+      processorLeaseExpiresAt: null,
+      completedAt: now,
+      updatedAt: now,
     })
-    .eq("id", importRunId);
-
-  if (error) {
-    throw new Error(`Unable to mark import run failed: ${error.message}`);
-  }
+    .where(eq(importRuns.id, importRunId))
+    .run();
 
   return getImportRunDetail(importRunId);
 }
@@ -765,7 +765,8 @@ export async function resetFailedImportRunItems(input: {
   importRunId: string;
   forceRefresh: boolean;
 }) {
-  const supabase = getSupabaseAdminClient();
+  const db = getDb();
+  const now = nowIso();
   const existingItems = await getImportRunItemRows(input.importRunId);
   const failedItems = existingItems.filter((item) => item.status === "failed");
 
@@ -773,44 +774,40 @@ export async function resetFailedImportRunItems(input: {
     return getImportRunDetail(input.importRunId);
   }
 
-  const { error: updateItemsError } = await supabase
-    .from("import_run_items")
-    .update({
-      status: "queued",
-      resolution: null,
-      error_message: null,
-      investigation_id: null,
-      started_at: null,
-      completed_at: null,
-      lease_expires_at: null,
-    })
-    .eq("import_run_id", input.importRunId)
-    .eq("status", "failed");
-
-  if (updateItemsError) {
-    throw new Error(`Unable to reset failed import run items: ${updateItemsError.message}`);
+  const failedIds = failedItems.map((item) => item.id);
+  if (failedIds.length > 0) {
+    db.update(importRunItems)
+      .set({
+        status: "queued",
+        resolution: null,
+        errorMessage: null,
+        investigationId: null,
+        startedAt: null,
+        completedAt: null,
+        leaseExpiresAt: null,
+        updatedAt: now,
+      })
+      .where(inArray(importRunItems.id, failedIds))
+      .run();
   }
 
-  const { error: updateRunError } = await supabase
-    .from("import_runs")
-    .update({
+  db.update(importRuns)
+    .set({
       status: "queued",
-      source_stage: "queued",
-      force_refresh: input.forceRefresh,
-      last_error: null,
-      completed_at: null,
-      processor_lease_expires_at: null,
+      sourceStage: "queued",
+      forceRefresh: input.forceRefresh,
+      lastError: null,
+      completedAt: null,
+      processorLeaseExpiresAt: null,
+      updatedAt: now,
     })
-    .eq("id", input.importRunId);
-
-  if (updateRunError) {
-    throw new Error(`Unable to reset import run: ${updateRunError.message}`);
-  }
+    .where(eq(importRuns.id, input.importRunId))
+    .run();
 
   return getImportRunDetail(input.importRunId);
 }
 
 export async function getImportRunBidIds(importRunId: string) {
   const items = await getImportRunItemRows(importRunId);
-  return items.map((item) => item.bid_id);
+  return items.map((item) => item.bidId);
 }

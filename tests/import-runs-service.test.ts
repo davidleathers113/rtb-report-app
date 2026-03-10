@@ -21,6 +21,10 @@ vi.mock("@/lib/investigations/service", () => ({
   investigateBid: vi.fn(),
 }));
 
+vi.mock("@/lib/db/import-ops-events", () => ({
+  createImportOpsEvent: vi.fn(),
+}));
+
 import {
   claimImportRunItems,
   claimImportRunProcessing,

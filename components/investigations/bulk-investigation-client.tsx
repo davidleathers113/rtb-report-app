@@ -29,6 +29,7 @@ import type {
   ImportScheduleRunHistoryStatusFilter,
   ImportScheduleRunSummary,
 } from "@/types/import-schedule";
+import type { ImportOpsEventPage } from "@/types/ops-event";
 
 const terminalStatuses = new Set([
   "completed",
@@ -162,6 +163,8 @@ function buildScheduleDrafts(schedules: ImportScheduleDetail[]) {
         name: schedule.name,
         windowMinutes: schedule.windowMinutes,
         overlapMinutes: schedule.overlapMinutes,
+        pauseReason: schedule.pauseReason ?? "",
+        snoozeHours: 4,
       },
     ]),
   ) as Record<
@@ -170,6 +173,8 @@ function buildScheduleDrafts(schedules: ImportScheduleDetail[]) {
       name: string;
       windowMinutes: 5 | 15 | 60;
       overlapMinutes: number;
+      pauseReason: string;
+      snoozeHours: number;
     }
   >;
 }
@@ -225,6 +230,22 @@ export function BulkInvestigationClient({
     ),
   );
   const [runHistoryLoading, setRunHistoryLoading] = useState<Record<string, boolean>>({});
+  const [opsEventPages, setOpsEventPages] = useState<Record<string, ImportOpsEventPage>>(
+    Object.fromEntries(
+      initialSchedules.map((schedule) => [
+        schedule.id,
+        {
+          items: schedule.recentOpsEvents,
+          total: schedule.recentOpsEventTotalCount,
+          limit: 5,
+          offset: 0,
+          eventType: "all",
+          severity: "all",
+        },
+      ]),
+    ),
+  );
+  const [opsEventLoading, setOpsEventLoading] = useState<Record<string, boolean>>({});
   const scheduleHealthSummary = useMemo(() => {
     const enabledCount = schedules.filter((schedule) => schedule.isEnabled).length;
     const unhealthyCount = schedules.filter((schedule) =>
@@ -380,6 +401,21 @@ export function BulkInvestigationClient({
               limit: 5,
               offset: 0,
               statusFilter: "all",
+            },
+          ]),
+        ),
+      );
+      setOpsEventPages((current) =>
+        Object.fromEntries(
+          nextSchedules.map((schedule) => [
+            schedule.id,
+            current[schedule.id] ?? {
+              items: schedule.recentOpsEvents,
+              total: schedule.recentOpsEventTotalCount,
+              limit: 5,
+              offset: 0,
+              eventType: "all",
+              severity: "all",
             },
           ]),
         ),
@@ -655,12 +691,55 @@ export function BulkInvestigationClient({
     }
   }
 
+  async function performScheduleAction(
+    scheduleId: string,
+    body: Record<string, unknown>,
+  ) {
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(`/api/import-schedules/${encodeURIComponent(scheduleId)}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          actionSource: "manual_ui",
+          ...body,
+        }),
+      });
+      const payload = (await response.json()) as
+        | { schedule?: ImportScheduleDetail | null; run?: ImportRunDetail | null; error?: string }
+        | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(errorPayload.error ?? "Unable to perform schedule action.");
+      }
+
+      const result = payload as {
+        schedule?: ImportScheduleDetail | null;
+        run?: ImportRunDetail | null;
+      };
+      if (result.run) {
+        setActiveRun(result.run);
+      }
+      await refreshSchedules();
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected schedule action error.",
+      );
+    }
+  }
+
   function updateScheduleDraft(
     scheduleId: string,
     patch: Partial<{
       name: string;
       windowMinutes: 5 | 15 | 60;
       overlapMinutes: number;
+      pauseReason: string;
+      snoozeHours: number;
     }>,
   ) {
     setScheduleDrafts((current) => ({
@@ -780,6 +859,65 @@ export function BulkInvestigationClient({
       );
     } finally {
       setRunHistoryLoading((state) => ({
+        ...state,
+        [scheduleId]: false,
+      }));
+    }
+  }
+
+  async function loadScheduleOpsEvents(
+    scheduleId: string,
+    input?: Partial<{
+      offset: number;
+      eventType: string;
+      severity: string;
+      append: boolean;
+    }>,
+  ) {
+    const current = opsEventPages[scheduleId] ?? {
+      items: [],
+      total: 0,
+      limit: 5,
+      offset: 0,
+      eventType: "all" as const,
+      severity: "all" as const,
+    };
+    const limit = current.limit;
+    const offset = input?.offset ?? 0;
+    const eventType = input?.eventType ?? current.eventType;
+    const severity = input?.severity ?? current.severity;
+
+    setOpsEventLoading((state) => ({
+      ...state,
+      [scheduleId]: true,
+    }));
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(
+        `/api/import-schedules/${encodeURIComponent(scheduleId)}?view=events&limit=${limit}&offset=${offset}&eventType=${eventType}&severity=${severity}`,
+      );
+      const payload = (await response.json()) as ImportOpsEventPage | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(errorPayload.error ?? "Unable to load ops events.");
+      }
+
+      const page = payload as ImportOpsEventPage;
+      setOpsEventPages((state) => ({
+        ...state,
+        [scheduleId]: {
+          ...page,
+          items: input?.append ? [...current.items, ...page.items] : page.items,
+        },
+      }));
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected ops events error.",
+      );
+    } finally {
+      setOpsEventLoading((state) => ({
         ...state,
         [scheduleId]: false,
       }));
@@ -1200,14 +1338,29 @@ export function BulkInvestigationClient({
                     name: schedule.name,
                     windowMinutes: schedule.windowMinutes,
                     overlapMinutes: schedule.overlapMinutes,
+                    pauseReason: schedule.pauseReason ?? "",
+                    snoozeHours: 4,
                   };
                   const activeScheduleRunId = schedule.activeRun?.id ?? null;
+                  const latestFailedRun =
+                    schedule.recentRuns.find((run) => {
+                      return run.status === "failed" || run.status === "completed_with_errors";
+                    }) ?? null;
+                  const latestRun = schedule.recentRuns[0] ?? null;
                   const runHistoryPage = runHistoryPages[schedule.id] ?? {
                     items: schedule.recentRuns,
                     total: schedule.recentRunTotalCount,
                     limit: 5,
                     offset: 0,
                     statusFilter: "all" as const,
+                  };
+                  const opsEventPage = opsEventPages[schedule.id] ?? {
+                    items: schedule.recentOpsEvents,
+                    total: schedule.recentOpsEventTotalCount,
+                    limit: 5,
+                    offset: 0,
+                    eventType: "all" as const,
+                    severity: "all" as const,
                   };
 
                   return (
@@ -1239,6 +1392,17 @@ export function BulkInvestigationClient({
                             <Badge variant={getScheduleHealthBadgeVariant(schedule.healthStatus)}>
                               {schedule.healthStatus}
                             </Badge>
+                            {schedule.isPaused ? (
+                              <Badge variant="warning">Paused</Badge>
+                            ) : null}
+                            {schedule.isCurrentAlertAcknowledged ? (
+                              <Badge variant="info">Acknowledged</Badge>
+                            ) : null}
+                            {schedule.isAlertSnoozed ? (
+                              <Badge variant="info">
+                                Snoozed until {formatTimestamp(schedule.alertSnoozedUntil)}
+                              </Badge>
+                            ) : null}
                             {schedule.consecutiveFailureCount > 0 ? (
                               <Badge variant="destructive">
                                 {schedule.consecutiveFailureCount} consecutive failure
@@ -1247,6 +1411,11 @@ export function BulkInvestigationClient({
                             ) : null}
                           </div>
                           <p className="text-sm text-slate-600">{schedule.healthSummary}</p>
+                          {schedule.currentAlertLabel ? (
+                            <p className="text-sm text-slate-600">
+                              Current alert: {schedule.currentAlertLabel}
+                            </p>
+                          ) : null}
                           <p className="text-sm text-slate-500">
                             Account `{schedule.accountId}` • overlap {schedule.overlapMinutes} min
                             • max concurrent {schedule.maxConcurrentRuns}
@@ -1309,6 +1478,17 @@ export function BulkInvestigationClient({
                           <Button
                             variant="outline"
                             onClick={() =>
+                              void performScheduleAction(schedule.id, {
+                                action: schedule.isPaused ? "resume_schedule" : "pause_schedule",
+                                reason: draft.pauseReason,
+                              })
+                            }
+                          >
+                            {schedule.isPaused ? "Resume" : "Pause"}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() =>
                               handleUpdateSchedule(schedule.id, {
                                 isEnabled: !schedule.isEnabled,
                               })
@@ -1328,6 +1508,110 @@ export function BulkInvestigationClient({
                           >
                             Save
                           </Button>
+                          <Button
+                            variant="outline"
+                            disabled={!schedule.currentAlertKey || schedule.isCurrentAlertAcknowledged}
+                            onClick={() =>
+                              void performScheduleAction(schedule.id, {
+                                action: "acknowledge_alert",
+                              })
+                            }
+                          >
+                            Acknowledge
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              void performScheduleAction(schedule.id, {
+                                action: "snooze_alert",
+                                snoozedUntil: new Date(
+                                  Date.now() + draft.snoozeHours * 60 * 60 * 1000,
+                                ).toISOString(),
+                              })
+                            }
+                          >
+                            Snooze
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={!schedule.isAlertSnoozed}
+                            onClick={() =>
+                              void performScheduleAction(schedule.id, {
+                                action: "clear_snooze",
+                              })
+                            }
+                          >
+                            Clear Snooze
+                          </Button>
+                          <Button
+                            variant="outline"
+                            onClick={() =>
+                              void performScheduleAction(schedule.id, {
+                                action: "run_now",
+                                forceRefresh: false,
+                              })
+                            }
+                          >
+                            Run Now
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={!latestFailedRun}
+                            onClick={() =>
+                              latestFailedRun
+                                ? void performScheduleAction(schedule.id, {
+                                    action: "retry_failed_run",
+                                    importRunId: latestFailedRun.id,
+                                    forceRefresh,
+                                  })
+                                : undefined
+                            }
+                          >
+                            Retry Latest Failed
+                          </Button>
+                          <Button
+                            variant="outline"
+                            disabled={!latestRun}
+                            onClick={() =>
+                              latestRun
+                                ? void performScheduleAction(schedule.id, {
+                                    action: "force_refresh_rerun",
+                                    importRunId: latestRun.id,
+                                  })
+                                : undefined
+                            }
+                          >
+                            Force Refresh Rerun
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        <input
+                          value={draft.pauseReason}
+                          onChange={(event) =>
+                            updateScheduleDraft(schedule.id, {
+                              pauseReason: event.target.value,
+                            })
+                          }
+                          placeholder="Pause reason"
+                          className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        />
+                        <select
+                          value={draft.snoozeHours}
+                          onChange={(event) =>
+                            updateScheduleDraft(schedule.id, {
+                              snoozeHours: Number(event.target.value) || 4,
+                            })
+                          }
+                          className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                        >
+                          <option value={1}>Snooze 1 hour</option>
+                          <option value={4}>Snooze 4 hours</option>
+                          <option value={24}>Snooze 24 hours</option>
+                        </select>
+                        <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
+                          Ack: {formatTimestamp(schedule.alertAcknowledgedAt)} • Snooze:{" "}
+                          {formatTimestamp(schedule.alertSnoozedUntil)}
                         </div>
                       </div>
                       <div className="mt-4 space-y-2">
@@ -1479,6 +1763,121 @@ export function BulkInvestigationClient({
                                   {runHistoryLoading[schedule.id] === true
                                     ? "Loading..."
                                     : "Load More Runs"}
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                      <div className="mt-4 space-y-2">
+                        <div>
+                          <h4 className="text-sm font-semibold text-slate-900">Recent ops events</h4>
+                          <p className="text-sm text-slate-500">
+                            Audit trail for alerts, triggers, pauses, and remediation actions.
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex flex-wrap gap-2">
+                            <select
+                              value={opsEventPage.eventType}
+                              onChange={(event) =>
+                                void loadScheduleOpsEvents(schedule.id, {
+                                  offset: 0,
+                                  eventType: event.target.value,
+                                  severity: opsEventPage.severity,
+                                })
+                              }
+                              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                            >
+                              <option value="all">All event types</option>
+                              <option value="trigger_attempted">Trigger attempted</option>
+                              <option value="trigger_auth_failed">Trigger auth failed</option>
+                              <option value="schedule_claimed">Schedule claimed</option>
+                              <option value="schedule_skipped_overlap">Skipped overlap</option>
+                              <option value="scheduled_run_created">Run created</option>
+                              <option value="scheduled_run_succeeded">Run succeeded</option>
+                              <option value="scheduled_run_failed">Run failed</option>
+                              <option value="schedule_became_stale">Became stale</option>
+                              <option value="alert_sent">Alert sent</option>
+                              <option value="alert_failed">Alert failed</option>
+                              <option value="alert_acknowledged">Alert acknowledged</option>
+                              <option value="alert_snoozed">Alert snoozed</option>
+                              <option value="alert_snooze_cleared">Snooze cleared</option>
+                              <option value="schedule_paused">Schedule paused</option>
+                              <option value="schedule_resumed">Schedule resumed</option>
+                              <option value="operator_retry_failed_run">Retry failed run</option>
+                              <option value="operator_force_refresh_rerun">Force rerun</option>
+                              <option value="operator_run_now">Run now</option>
+                            </select>
+                            <select
+                              value={opsEventPage.severity}
+                              onChange={(event) =>
+                                void loadScheduleOpsEvents(schedule.id, {
+                                  offset: 0,
+                                  eventType: opsEventPage.eventType,
+                                  severity: event.target.value,
+                                })
+                              }
+                              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                            >
+                              <option value="all">All severities</option>
+                              <option value="info">Info</option>
+                              <option value="warning">Warning</option>
+                              <option value="error">Error</option>
+                            </select>
+                          </div>
+                          <p className="text-sm text-slate-500">
+                            Showing {opsEventPage.items.length} of {opsEventPage.total}
+                          </p>
+                        </div>
+                        {opsEventPage.items.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-slate-200 bg-white p-3 text-sm text-slate-500">
+                            No ops events yet.
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            {opsEventPage.items.map((event) => (
+                              <div
+                                key={event.id}
+                                className="rounded-lg border border-slate-200 bg-white p-3 text-sm"
+                              >
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Badge
+                                    variant={
+                                      event.severity === "error"
+                                        ? "destructive"
+                                        : event.severity === "warning"
+                                          ? "warning"
+                                          : "info"
+                                    }
+                                  >
+                                    {event.severity}
+                                  </Badge>
+                                  <Badge variant="default">{event.eventType}</Badge>
+                                  <span className="text-slate-500">
+                                    {formatTimestamp(event.createdAt)} • {event.source}
+                                  </span>
+                                </div>
+                                <p className="mt-2 text-slate-900">{event.message}</p>
+                              </div>
+                            ))}
+                            {opsEventPage.items.length < opsEventPage.total ? (
+                              <div className="flex justify-end">
+                                <Button
+                                  variant="outline"
+                                  disabled={opsEventLoading[schedule.id] === true}
+                                  onClick={() =>
+                                    void loadScheduleOpsEvents(schedule.id, {
+                                      append: true,
+                                      offset: opsEventPage.items.length,
+                                      eventType: opsEventPage.eventType,
+                                      severity: opsEventPage.severity,
+                                    })
+                                  }
+                                >
+                                  {opsEventLoading[schedule.id] === true
+                                    ? "Loading..."
+                                    : "Load More Events"}
                                 </Button>
                               </div>
                             ) : null}

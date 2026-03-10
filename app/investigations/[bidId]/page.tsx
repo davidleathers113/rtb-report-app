@@ -1,3 +1,5 @@
+export const runtime = "nodejs";
+
 import Link from "next/link";
 
 import { BidDetailView } from "@/components/investigations/bid-detail-view";
@@ -26,8 +28,8 @@ export default async function InvestigationDetailPage({
           </CardHeader>
           <CardContent className="space-y-4">
             <p className="text-sm leading-6 text-slate-600">
-              This bid has not been investigated yet, or the database connection is
-              not configured.
+              This bid has not been investigated yet, or the stored investigation
+              is currently unavailable.
             </p>
             <Button asChild variant="outline">
               <Link href="/investigations">Back To Bulk Investigation</Link>
