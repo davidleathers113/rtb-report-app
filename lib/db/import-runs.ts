@@ -1,6 +1,6 @@
 import "server-only";
 
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 
 import { getDb, getSqlite } from "@/lib/db/client";
 import { getInvestigationListItemsByIds } from "@/lib/db/investigations";
@@ -465,6 +465,76 @@ export async function addImportRunItems(input: {
     detail,
     insertedCount,
   };
+}
+
+export async function getImportRunItemCount(importRunId: string) {
+  const db = getDb();
+  const row = db
+    .select({
+      count: sql<number>`count(*)`,
+    })
+    .from(importRunItems)
+    .where(eq(importRunItems.importRunId, importRunId))
+    .get() as { count: number } | undefined;
+
+  return row?.count ?? 0;
+}
+
+export async function insertImportRunItemsBatch(input: {
+  importRunId: string;
+  bidIds: string[];
+  startPosition: number;
+}) {
+  if (input.bidIds.length === 0) {
+    return {
+      insertedCount: 0,
+      nextPosition: input.startPosition,
+    };
+  }
+
+  const db = getDb();
+  const now = nowIso();
+  const chunks = splitIntoChunks(input.bidIds, 1000);
+  let currentPosition = input.startPosition;
+
+  for (const chunk of chunks) {
+    const rows = chunk.map((bidId) => {
+      const row = {
+        id: createId(),
+        importRunId: input.importRunId,
+        bidId,
+        position: currentPosition,
+        status: "queued" as ImportRunItemStatus,
+        createdAt: now,
+        updatedAt: now,
+      };
+      currentPosition += 1;
+      return row;
+    });
+
+    db.insert(importRunItems).values(rows).run();
+  }
+
+  return {
+    insertedCount: input.bidIds.length,
+    nextPosition: currentPosition,
+  };
+}
+
+export async function updateImportRunTotals(input: {
+  importRunId: string;
+  totalFound: number;
+}) {
+  const db = getDb();
+  const now = nowIso();
+
+  db.update(importRuns)
+    .set({
+      totalFound: input.totalFound,
+      updatedAt: now,
+    })
+    .where(eq(importRuns.id, input.importRunId))
+    .run();
 }
 
 export async function getImportSourceCheckpoint(sourceKey: string) {

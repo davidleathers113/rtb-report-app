@@ -18,6 +18,7 @@ import {
 } from "@/lib/db/import-schedules";
 import { createImportOpsEvent } from "@/lib/db/import-ops-events";
 import { investigateBid } from "@/lib/investigations/service";
+import { processCsvDirectImportItem } from "@/lib/import-runs/csv-direct";
 import { prepareRingbaRecentImportRun } from "@/lib/import-runs/ringba-recent";
 import type { ImportRunDetail } from "@/types/import-run";
 
@@ -167,6 +168,20 @@ export async function processImportRun(input: {
 
       for (const item of claimedItems) {
         try {
+          if (current.sourceType === "csv_direct_import") {
+            const result = await processCsvDirectImportItem({
+              importRunId: input.importRunId,
+              bidId: item.bidId,
+            });
+
+            await completeImportRunItem({
+              itemId: item.id,
+              investigationId: result.investigationId,
+              resolution: result.resolution,
+            });
+            continue;
+          }
+
           const result = await investigateBid(item.bidId, {
             importRunId: input.importRunId,
             forceRefresh: claim.forceRefresh,

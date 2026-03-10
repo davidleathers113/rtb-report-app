@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { MAX_CSV_BID_IDS } from "@/lib/import-runs/csv-constants";
 import { ImportRunItemsTable } from "@/components/investigations/import-run-items-table";
@@ -14,14 +14,18 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { JsonView } from "@/components/shared/json-view";
 import { Textarea } from "@/components/ui/textarea";
 import { parseBidIds } from "@/lib/utils/bid-input";
 import type { InvestigationListItem } from "@/types/bid";
 import type {
+  CsvDirectPreviewResult,
   CsvPreviewResult,
   ImportRunDetail,
   RingbaRecentImportDiagnostics,
 } from "@/types/import-run";
+import type { ImportSourceRowsResponse } from "@/types/import-source";
 import type {
   ImportScheduleDetail,
   ImportScheduleHealthStatus,
@@ -191,13 +195,30 @@ export function BulkInvestigationClient({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPreviewingCsv, setIsPreviewingCsv] = useState(false);
   const [isSubmittingCsv, setIsSubmittingCsv] = useState(false);
+  const [isSubmittingDirectCsv, setIsSubmittingDirectCsv] = useState(false);
+  const [isPreviewingDirectCsv, setIsPreviewingDirectCsv] = useState(false);
   const [isSubmittingRecentImport, setIsSubmittingRecentImport] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeRun, setActiveRun] = useState<ImportRunDetail | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [csvPreview, setCsvPreview] = useState<CsvPreviewResult | null>(null);
+  const [directCsvPreview, setDirectCsvPreview] = useState<CsvDirectPreviewResult | null>(
+    null,
+  );
   const [selectedCsvColumnKey, setSelectedCsvColumnKey] = useState<string>("");
+  const [isDirectCsvMode, setIsDirectCsvMode] = useState(false);
+  const [isSourceRowsModalOpen, setIsSourceRowsModalOpen] = useState(false);
+  const [sourceRows, setSourceRows] = useState<ImportSourceRowsResponse | null>(null);
+  const [isLoadingSourceRows, setIsLoadingSourceRows] = useState(false);
+  const [sourceRowsError, setSourceRowsError] = useState<string | null>(null);
+  const [sourceRowsFileName, setSourceRowsFileName] = useState<string>("");
+  const [sourceRowsBidId, setSourceRowsBidId] = useState<string>("");
+  const [sourceRowsStartDate, setSourceRowsStartDate] = useState<string>("");
+  const [sourceRowsEndDate, setSourceRowsEndDate] = useState<string>("");
+  const [sourceRowsOffset, setSourceRowsOffset] = useState(0);
+  const [expandedSourceRows, setExpandedSourceRows] = useState<Record<string, boolean>>({});
+  const sourceRowsLimit = 50;
   const [recentWindowMinutes, setRecentWindowMinutes] = useState<5 | 15 | 60>(15);
   const [schedules, setSchedules] = useState<ImportScheduleDetail[]>(initialSchedules);
   const [isRefreshingSchedules, setIsRefreshingSchedules] = useState(false);
@@ -509,16 +530,53 @@ export function BulkInvestigationClient({
     }
   }
 
+  async function previewDirectCsv(file: File) {
+    setIsPreviewingDirectCsv(true);
+    setErrorMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const response = await fetch("/api/import-runs/csv-direct/preview", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as
+        | CsvDirectPreviewResult
+        | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(errorPayload.error ?? "Unable to preview direct CSV import.");
+      }
+
+      setDirectCsvPreview(payload as CsvDirectPreviewResult);
+    } catch (error) {
+      setDirectCsvPreview(null);
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected direct CSV preview error.",
+      );
+    } finally {
+      setIsPreviewingDirectCsv(false);
+    }
+  }
+
   async function handleCsvFileChange(file: File | null) {
     setCsvFile(file);
     setCsvPreview(null);
+    setDirectCsvPreview(null);
     setSelectedCsvColumnKey("");
 
     if (!file) {
       return;
     }
 
-    await previewCsv(file);
+    if (isDirectCsvMode) {
+      await previewDirectCsv(file);
+    } else {
+      await previewCsv(file);
+    }
   }
 
   async function handleCsvColumnChange(nextColumnKey: string) {
@@ -572,6 +630,91 @@ export function BulkInvestigationClient({
     }
   }
 
+  async function handleSubmitDirectCsv() {
+    if (!csvFile) {
+      setErrorMessage("Upload a CSV file before creating a direct import run.");
+      return;
+    }
+
+    setIsSubmittingDirectCsv(true);
+    setErrorMessage(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", csvFile);
+      formData.append("forceRefresh", String(forceRefresh));
+
+      const response = await fetch("/api/import-runs/csv-direct", {
+        method: "POST",
+        body: formData,
+      });
+      const payload = (await response.json()) as
+        | ImportRunDetail
+        | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(errorPayload.error ?? "Unable to create direct CSV import run.");
+      }
+
+      setActiveRun(payload as ImportRunDetail);
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected direct CSV import error.",
+      );
+    } finally {
+      setIsSubmittingDirectCsv(false);
+    }
+  }
+
+  async function loadSourceRows(nextOffset = 0) {
+    setIsLoadingSourceRows(true);
+    setSourceRowsError(null);
+    setSourceRowsOffset(nextOffset);
+
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", String(sourceRowsLimit));
+      params.set("offset", String(nextOffset));
+      if (sourceRowsFileName) {
+        params.set("fileName", sourceRowsFileName);
+      }
+      if (sourceRowsBidId) {
+        params.set("bidId", sourceRowsBidId);
+      }
+      if (sourceRowsStartDate) {
+        params.set("startBidDt", sourceRowsStartDate);
+      }
+      if (sourceRowsEndDate) {
+        params.set("endBidDt", sourceRowsEndDate);
+      }
+
+      const response = await fetch(`/api/import-source-rows?${params.toString()}`);
+      const payload = (await response.json()) as
+        | ImportSourceRowsResponse
+        | { error?: string };
+
+      if (!response.ok) {
+        const errorPayload = payload as { error?: string };
+        throw new Error(errorPayload.error ?? "Unable to load source rows.");
+      }
+
+      setSourceRows(payload as ImportSourceRowsResponse);
+    } catch (error) {
+      setSourceRowsError(
+        error instanceof Error ? error.message : "Unexpected source rows error.",
+      );
+    } finally {
+      setIsLoadingSourceRows(false);
+    }
+  }
+
+  function toggleSourceRow(rowId: string) {
+    setExpandedSourceRows((current) => ({
+      ...current,
+      [rowId]: !current[rowId],
+    }));
+  }
   async function handleSubmitRecentImport() {
     setIsSubmittingRecentImport(true);
     setErrorMessage(null);
@@ -1035,12 +1178,24 @@ export function BulkInvestigationClient({
                   setActiveRun(null);
                   setCsvFile(null);
                   setCsvPreview(null);
+                  setDirectCsvPreview(null);
                   setSelectedCsvColumnKey("");
+                  setIsDirectCsvMode(false);
                   setRecentWindowMinutes(15);
                   setErrorMessage(null);
                 }}
               >
                 Clear
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsSourceRowsModalOpen(true);
+                  setSourceRowsOffset(0);
+                  void loadSourceRows(0);
+                }}
+              >
+                Raw Source Rows
               </Button>
               <Button onClick={handleSubmit} disabled={isSubmitting}>
                 {isSubmitting ? "Creating Import Run..." : "Create Import Run"}
@@ -1051,8 +1206,9 @@ export function BulkInvestigationClient({
             <div className="space-y-2">
               <p className="text-sm font-semibold text-slate-900">Or upload a CSV</p>
               <p className="text-sm text-slate-500">
-                Supports standard quoted CSV files up to {MAX_CSV_BID_IDS} Bid IDs.
-                Common Bid ID headers are auto-detected.
+                Supports standard quoted CSV files up to {MAX_CSV_BID_IDS} Bid IDs for
+                Ringba lookups. Direct imports use a larger file limit and store rows
+                into SQLite without external fetches.
               </p>
             </div>
             <div className="mt-4 space-y-4">
@@ -1066,13 +1222,38 @@ export function BulkInvestigationClient({
                 className="block w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               />
 
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={isDirectCsvMode}
+                  onChange={(event) => {
+                    const nextValue = event.target.checked;
+                    setIsDirectCsvMode(nextValue);
+                    setCsvPreview(null);
+                    setDirectCsvPreview(null);
+                    setSelectedCsvColumnKey("");
+                    if (csvFile) {
+                      void (nextValue ? previewDirectCsv(csvFile) : previewCsv(csvFile));
+                    }
+                  }}
+                  className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                />
+                Direct CSV import (store rows into SQLite without Ringba fetches)
+              </label>
+
               {isPreviewingCsv ? (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
                   Previewing CSV...
                 </div>
               ) : null}
 
-              {csvPreview ? (
+              {isPreviewingDirectCsv ? (
+                <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+                  Previewing direct CSV...
+                </div>
+              ) : null}
+
+              {!isDirectCsvMode && csvPreview ? (
                 <div className="space-y-4 rounded-lg bg-slate-50 p-4">
                   <div className="grid gap-3 md:grid-cols-4">
                     <div>
@@ -1161,6 +1342,97 @@ export function BulkInvestigationClient({
                       {isSubmittingCsv
                         ? "Creating CSV Import Run..."
                         : "Create Import Run From CSV"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              {isDirectCsvMode && directCsvPreview ? (
+                <div className="space-y-4 rounded-lg bg-slate-50 p-4">
+                  <div className="grid gap-3 md:grid-cols-4">
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        Data Rows
+                      </p>
+                      <p className="mt-1 text-lg font-semibold text-slate-900">
+                        {directCsvPreview.totalRows}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        Valid Bid IDs
+                      </p>
+                      <p className="mt-1 text-lg font-semibold text-slate-900">
+                        {directCsvPreview.validBidIdCount}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        Missing Bid IDs
+                      </p>
+                      <p className="mt-1 text-lg font-semibold text-slate-900">
+                        {directCsvPreview.missingBidIdCount}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-wide text-slate-500">
+                        Duplicates
+                      </p>
+                      <p className="mt-1 text-lg font-semibold text-slate-900">
+                        {directCsvPreview.duplicateBidIdCount}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg bg-white p-3 text-sm">
+                      <p className="text-slate-500">Earliest Bid Date</p>
+                      <p className="mt-1 font-medium text-slate-900">
+                        {directCsvPreview.earliestBidDt ?? "N/A"}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-white p-3 text-sm">
+                      <p className="text-slate-500">Latest Bid Date</p>
+                      <p className="mt-1 font-medium text-slate-900">
+                        {directCsvPreview.latestBidDt ?? "N/A"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-slate-900">Sample Rows</p>
+                    <div className="flex flex-wrap gap-2">
+                      {directCsvPreview.sampleRows.map((row) => (
+                        <Badge key={`${row.rowNumber}-${row.bidId ?? "row"}`} variant="info">
+                          {row.bidId ?? "Missing Bid ID"} • {row.bidDt ?? "No date"}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+
+                  {directCsvPreview.invalidRows.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-amber-800">
+                        Invalid rows
+                      </p>
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                        {directCsvPreview.invalidRows.map((row) => (
+                          <div key={`${row.rowNumber}-${row.value}`}>
+                            Row {row.rowNumber}: {row.value || "(blank)"} - {row.message}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="flex justify-end">
+                    <Button
+                      onClick={handleSubmitDirectCsv}
+                      disabled={isSubmittingDirectCsv}
+                    >
+                      {isSubmittingDirectCsv
+                        ? "Creating Direct CSV Import..."
+                        : "Create Direct CSV Import"}
                     </Button>
                   </div>
                 </div>
@@ -1897,6 +2169,187 @@ export function BulkInvestigationClient({
           ) : null}
         </CardContent>
       </Card>
+
+      {isSourceRowsModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-5xl rounded-lg bg-white shadow-lg">
+            <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Raw Source Rows</h2>
+                <p className="text-sm text-slate-500">
+                  Browse raw CSV rows by file, bid id, or bid date range.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsSourceRowsModalOpen(false);
+                }}
+              >
+                Close
+              </Button>
+            </div>
+            <div className="space-y-4 px-6 py-4">
+              <div className="grid gap-3 md:grid-cols-4">
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span>File</span>
+                  <select
+                    value={sourceRowsFileName}
+                    onChange={(event) => setSourceRowsFileName(event.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900"
+                  >
+                    <option value="">All files</option>
+                    {(sourceRows?.files ?? []).map((file) => (
+                      <option key={file.id} value={file.fileName}>
+                        {file.fileName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span>Bid ID</span>
+                  <Input
+                    value={sourceRowsBidId}
+                    onChange={(event) => setSourceRowsBidId(event.target.value)}
+                    placeholder="RTB123..."
+                  />
+                </label>
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span>Start date</span>
+                  <Input
+                    type="date"
+                    value={sourceRowsStartDate}
+                    onChange={(event) => setSourceRowsStartDate(event.target.value)}
+                  />
+                </label>
+                <label className="space-y-1 text-sm text-slate-600">
+                  <span>End date</span>
+                  <Input
+                    type="date"
+                    value={sourceRowsEndDate}
+                    onChange={(event) => setSourceRowsEndDate(event.target.value)}
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() => void loadSourceRows(0)}
+                  disabled={isLoadingSourceRows}
+                >
+                  {isLoadingSourceRows ? "Loading..." : "Apply Filters"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setSourceRowsFileName("");
+                    setSourceRowsBidId("");
+                    setSourceRowsStartDate("");
+                    setSourceRowsEndDate("");
+                    setSourceRowsOffset(0);
+                    void loadSourceRows(0);
+                  }}
+                >
+                  Clear Filters
+                </Button>
+              </div>
+
+              {sourceRowsError ? (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                  {sourceRowsError}
+                </div>
+              ) : null}
+
+              <div className="rounded-lg border border-slate-200">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-slate-200 bg-slate-50 text-left text-slate-600">
+                    <tr>
+                      <th className="px-3 py-2"></th>
+                      <th className="px-3 py-2">File</th>
+                      <th className="px-3 py-2">Row</th>
+                      <th className="px-3 py-2">Bid ID</th>
+                      <th className="px-3 py-2">Bid Date</th>
+                      <th className="px-3 py-2">Campaign</th>
+                      <th className="px-3 py-2">Publisher</th>
+                      <th className="px-3 py-2">Bid</th>
+                      <th className="px-3 py-2">Reason</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(sourceRows?.items ?? []).map((row) => {
+                      const isExpanded = expandedSourceRows[row.id] ?? false;
+                      return (
+                        <Fragment key={row.id}>
+                          <tr className="border-b border-slate-100">
+                            <td className="px-3 py-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => toggleSourceRow(row.id)}
+                              >
+                                {isExpanded ? "Hide" : "View"}
+                              </Button>
+                            </td>
+                            <td className="px-3 py-2">{row.fileName}</td>
+                            <td className="px-3 py-2">{row.rowNumber}</td>
+                            <td className="px-3 py-2">{row.bidId ?? "-"}</td>
+                            <td className="px-3 py-2">{row.bidDt ?? "-"}</td>
+                            <td className="px-3 py-2">{row.campaignName ?? "-"}</td>
+                            <td className="px-3 py-2">{row.publisherName ?? "-"}</td>
+                            <td className="px-3 py-2">{row.bidAmount ?? "-"}</td>
+                            <td className="px-3 py-2">{row.reasonForReject ?? "-"}</td>
+                          </tr>
+                          {isExpanded ? (
+                            <tr className="border-b border-slate-100 bg-slate-50">
+                              <td colSpan={9} className="px-3 py-3">
+                                <JsonView value={row.rowJson} />
+                              </td>
+                            </tr>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
+                    {!isLoadingSourceRows && (sourceRows?.items ?? []).length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="px-3 py-4 text-center text-slate-500">
+                          No source rows found.
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex items-center justify-between text-sm text-slate-600">
+                <span>
+                  Showing {sourceRows?.items.length ?? 0} of {sourceRows?.total ?? 0}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={sourceRowsOffset === 0 || isLoadingSourceRows}
+                    onClick={() =>
+                      void loadSourceRows(Math.max(0, sourceRowsOffset - sourceRowsLimit))
+                    }
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={
+                      isLoadingSourceRows ||
+                      !sourceRows ||
+                      sourceRowsOffset + sourceRowsLimit >= sourceRows.total
+                    }
+                    onClick={() => void loadSourceRows(sourceRowsOffset + sourceRowsLimit)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {activeRun ? (
         <Card>

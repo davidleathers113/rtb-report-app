@@ -1,0 +1,3 @@
+export const MAX_CSV_DIRECT_UPLOAD_BYTES = 25 * 1024 * 1024;
+export const MAX_CSV_DIRECT_ROWS = 250000;
+export const CSV_DIRECT_CHUNK_SIZE = 1000;

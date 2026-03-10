@@ -158,3 +158,29 @@ export interface CsvPreviewResult {
     message: string;
   }>;
 }
+
+export interface CsvDirectPreviewResult {
+  fileName: string;
+  totalRows: number;
+  validBidIdCount: number;
+  missingBidIdCount: number;
+  duplicateBidIdCount: number;
+  invalidBidIdCount: number;
+  earliestBidDt: string | null;
+  latestBidDt: string | null;
+  headers: string[];
+  sampleRows: Array<{
+    rowNumber: number;
+    bidId: string | null;
+    bidDt: string | null;
+    campaignName: string | null;
+    publisherName: string | null;
+    bidAmount: number | null;
+    reasonForReject: string | null;
+  }>;
+  invalidRows: Array<{
+    rowNumber: number;
+    value: string;
+    message: string;
+  }>;
+}

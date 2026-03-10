@@ -192,6 +192,72 @@ export const importRunItems = sqliteTable(
   }),
 );
 
+export const importSourceFiles = sqliteTable(
+  "import_source_files",
+  {
+    id: text("id").primaryKey(),
+    importRunId: text("import_run_id").references(() => importRuns.id, {
+      onDelete: "cascade",
+    }),
+    sourceType: text("source_type").notNull(),
+    fileName: text("file_name").notNull(),
+    rowCount: integer("row_count").notNull().default(0),
+    headerJson: text("header_json", { mode: "json" }).notNull().default(sql`'[]'`),
+    sourceMetadata: text("source_metadata", { mode: "json" }).notNull().default(sql`'{}'`),
+    createdAt: text("created_at").notNull().default(nowIso),
+    updatedAt: text("updated_at").notNull().default(nowIso),
+  },
+  (table) => ({
+    importRunIdx: index("import_source_files_import_run_id_idx").on(table.importRunId),
+    sourceTypeIdx: index("import_source_files_source_type_idx").on(table.sourceType),
+  }),
+);
+
+export const importSourceRows = sqliteTable(
+  "import_source_rows",
+  {
+    id: text("id").primaryKey(),
+    importSourceFileId: text("import_source_file_id")
+      .notNull()
+      .references(() => importSourceFiles.id, {
+        onDelete: "cascade",
+      }),
+    importRunId: text("import_run_id")
+      .notNull()
+      .references(() => importRuns.id, {
+        onDelete: "cascade",
+      }),
+    rowNumber: integer("row_number").notNull(),
+    bidId: text("bid_id"),
+    bidDt: text("bid_dt"),
+    campaignName: text("campaign_name"),
+    campaignId: text("campaign_id"),
+    publisherName: text("publisher_name"),
+    publisherId: text("publisher_id"),
+    bidAmount: real("bid_amount"),
+    winningBid: real("winning_bid"),
+    bidRejected: integer("bid_rejected", { mode: "boolean" }),
+    reasonForReject: text("reason_for_reject"),
+    bidDid: text("bid_did"),
+    bidExpireDate: text("bid_expire_date"),
+    expirationSeconds: integer("expiration_seconds"),
+    winningBidCallAccepted: integer("winning_bid_call_accepted", { mode: "boolean" }),
+    winningBidCallRejected: integer("winning_bid_call_rejected", { mode: "boolean" }),
+    bidElapsedMs: integer("bid_elapsed_ms"),
+    rowJson: text("row_json", { mode: "json" }).notNull().default(sql`'{}'`),
+    createdAt: text("created_at").notNull().default(nowIso),
+    updatedAt: text("updated_at").notNull().default(nowIso),
+  },
+  (table) => ({
+    importSourceFileIdx: index("import_source_rows_file_id_idx").on(
+      table.importSourceFileId,
+    ),
+    importRunIdx: index("import_source_rows_import_run_id_idx").on(table.importRunId),
+    bidIdIdx: index("import_source_rows_bid_id_idx").on(table.bidId),
+    bidDtIdx: index("import_source_rows_bid_dt_idx").on(table.bidDt),
+  }),
+);
+
 export const importSourceCheckpoints = sqliteTable(
   "import_source_checkpoints",
   {
@@ -242,3 +308,5 @@ export type ImportRunItemRow = typeof importRunItems.$inferSelect;
 export type ImportSourceCheckpointRow = typeof importSourceCheckpoints.$inferSelect;
 export type ImportScheduleRow = typeof importSchedules.$inferSelect;
 export type ImportOpsEventRow = typeof importOpsEvents.$inferSelect;
+export type ImportSourceFileRow = typeof importSourceFiles.$inferSelect;
+export type ImportSourceRow = typeof importSourceRows.$inferSelect;
