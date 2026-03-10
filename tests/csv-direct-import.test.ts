@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getDb, resetDbClientForTests } from "@/lib/db/client";
 import {
@@ -328,6 +328,38 @@ describe("csv direct streaming import", () => {
         forceRefresh: false,
       }),
     ).rejects.toThrow("The uploaded CSV does not contain any data rows.");
+  });
+
+  it("enforces the direct import row limit during streamed preview", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/import-runs/csv-direct-constants", () => ({
+      MAX_CSV_DIRECT_UPLOAD_BYTES: 25 * 1024 * 1024,
+      MAX_CSV_DIRECT_ROWS: 5,
+      CSV_DIRECT_CHUNK_SIZE: 1000,
+    }));
+
+    try {
+      const { previewCsvDirectUpload: previewWithSmallLimit } = await import(
+        "@/lib/import-runs/csv-direct"
+      );
+
+      const rows = ["Bid ID,Bid Date"];
+
+      for (let index = 0; index < 6; index += 1) {
+        rows.push(`RTB${index},03/05/2026 01:08:34 PM`);
+      }
+
+      const file = new File([rows.join("\n")], "too-many-rows.csv", {
+        type: "text/csv",
+      });
+
+      await expect(previewWithSmallLimit({ file })).rejects.toThrow(
+        "The uploaded CSV exceeds the 5 row limit for direct import.",
+      );
+    } finally {
+      vi.doUnmock("@/lib/import-runs/csv-direct-constants");
+      vi.resetModules();
+    }
   });
 
   it("marks the import run as failed when parsing aborts", async () => {

@@ -30,12 +30,28 @@ function getRequiredEnv(name: string) {
   return value;
 }
 
+function getAuthScheme() {
+  const configured = process.env.RINGBA_AUTH_SCHEME?.trim();
+
+  if (!configured) {
+    return "Token";
+  }
+
+  // Ringba API access tokens use the Token scheme. Normalize legacy Bearer
+  // configs so existing local environments keep working after the auth change.
+  if (configured.toLowerCase() === "bearer") {
+    return "Token";
+  }
+
+  return configured;
+}
+
 export function getRingbaConfig(): RingbaConfig {
   return {
     accountId: getRequiredEnv("RINGBA_ACCOUNT_ID"),
     apiToken: getRequiredEnv("RINGBA_API_TOKEN"),
     apiBaseUrl: process.env.RINGBA_API_BASE_URL ?? "https://api.ringba.com",
-    authScheme: process.env.RINGBA_AUTH_SCHEME ?? "Token",
+    authScheme: getAuthScheme(),
   };
 }
 

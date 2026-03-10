@@ -11,6 +11,7 @@ import {
   updateImportRunSourceState,
   upsertImportSourceCheckpoint,
 } from "@/lib/db/import-runs";
+import { createImportSourceFile, insertImportSourceRows } from "@/lib/db/import-sources";
 import { getRingbaConfig } from "@/lib/ringba/client";
 import { safeJsonParse } from "@/lib/utils/json";
 import { isValidBidId } from "@/lib/utils/bid-id";
@@ -76,6 +77,28 @@ interface ParsedRtbExportCsv {
   earliestBidDt: string | null;
   headers: string[];
   sampleBidIds: string[];
+  sourceRows: ParsedRtbExportSourceRow[];
+}
+
+interface ParsedRtbExportSourceRow {
+  rowNumber: number;
+  bidId: string | null;
+  bidDt: string | null;
+  campaignName: string | null;
+  campaignId: string | null;
+  publisherName: string | null;
+  publisherId: string | null;
+  bidAmount: number | null;
+  winningBid: number | null;
+  bidRejected: boolean | null;
+  reasonForReject: string | null;
+  bidDid: string | null;
+  bidExpireDate: string | null;
+  expirationSeconds: number | null;
+  winningBidCallAccepted: boolean | null;
+  winningBidCallRejected: boolean | null;
+  bidElapsedMs: number | null;
+  rowJson: Record<string, unknown>;
 }
 
 interface DownloadedRtbExportZip {
@@ -105,6 +128,71 @@ function normalizeHeaderValue(value: string) {
   }
 
   return normalized;
+}
+
+function findHeaderIndex(headers: string[], aliases: readonly string[]) {
+  for (let index = 0; index < headers.length; index += 1) {
+    const normalized = normalizeHeaderValue(headers[index] ?? "");
+    if (aliases.includes(normalized)) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function readStringCell(row: string[], index: number) {
+  if (index < 0 || index >= row.length) {
+    return "";
+  }
+
+  return (row[index] ?? "").trim();
+}
+
+function readNullableCell(row: string[], index: number) {
+  const value = readStringCell(row, index);
+  return value || null;
+}
+
+function parseNumberCell(row: string[], index: number) {
+  const value = readStringCell(row, index);
+
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function parseBooleanCell(row: string[], index: number) {
+  const value = readStringCell(row, index);
+  const normalized = value.toLowerCase();
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (normalized === "true" || normalized === "yes" || normalized === "1") {
+    return true;
+  }
+
+  if (normalized === "false" || normalized === "no" || normalized === "0") {
+    return false;
+  }
+
+  return null;
+}
+
+function buildRowJson(headers: string[], row: string[]) {
+  const rowJson: Record<string, unknown> = {};
+
+  for (let index = 0; index < headers.length; index += 1) {
+    const header = (headers[index] ?? "").trim() || `Column ${index + 1}`;
+    rowJson[header] = row[index] ?? "";
+  }
+
+  return rowJson;
 }
 
 function dedupeBidIds(values: string[]) {
@@ -308,6 +396,25 @@ export async function createRtbExportJob(input: CreateRtbExportJobInput) {
   const config = getRingbaConfig();
   const accountId = input.accountId ?? config.accountId;
   const requestUrl = `${config.apiBaseUrl}/${accountId}/rtb/export/csv`;
+  const requestBody: Record<string, unknown> = {
+    reportStart: input.reportStart,
+    reportEnd: input.reportEnd,
+    formatTimespans: input.formatTimespans ?? true,
+    formatPercentages: input.formatPercentages ?? true,
+    formatDateTime: input.formatDateTime ?? true,
+    generateRollups: input.generateRollups ?? false,
+    valueColumns:
+      input.valueColumns ??
+      RINGBA_RECENT_IMPORT_COLUMNS.map((column) => ({
+        column,
+      })),
+    filters: input.filters ?? [],
+  };
+
+  if (typeof input.formatTimeZone === "string" && input.formatTimeZone.trim()) {
+    requestBody.formatTimeZone = input.formatTimeZone.trim();
+  }
+
   const response = await fetch(requestUrl, {
     method: "POST",
     headers: {
@@ -315,21 +422,7 @@ export async function createRtbExportJob(input: CreateRtbExportJobInput) {
       "Content-Type": "application/json",
       Authorization: `${config.authScheme} ${config.apiToken}`,
     },
-    body: JSON.stringify({
-      reportStart: input.reportStart,
-      reportEnd: input.reportEnd,
-      formatTimespans: input.formatTimespans ?? true,
-      formatPercentages: input.formatPercentages ?? true,
-      formatDateTime: input.formatDateTime ?? true,
-      generateRollups: input.generateRollups ?? false,
-      formatTimeZone: input.formatTimeZone ?? "UTC",
-      valueColumns:
-        input.valueColumns ??
-        RINGBA_RECENT_IMPORT_COLUMNS.map((column) => ({
-          column,
-        })),
-      filters: input.filters ?? [],
-    }),
+    body: JSON.stringify(requestBody),
     cache: "no-store",
   });
 
@@ -501,31 +594,25 @@ export function parseRtbExportCsv(csvText: string): ParsedRtbExportCsv {
       earliestBidDt: null,
       headers,
       sampleBidIds: [],
+      sourceRows: [],
     };
   }
 
-  let bidIdIndex = -1;
-  let bidDateIndex = -1;
-
-  headers.forEach((header, index) => {
-    const normalized = normalizeHeaderValue(header);
-
-    if (
-      BID_ID_HEADER_ALIASES.includes(
-        normalized as (typeof BID_ID_HEADER_ALIASES)[number],
-      )
-    ) {
-      bidIdIndex = index;
-    }
-
-    if (
-      BID_DATE_HEADER_ALIASES.includes(
-        normalized as (typeof BID_DATE_HEADER_ALIASES)[number],
-      )
-    ) {
-      bidDateIndex = index;
-    }
-  });
+  const bidIdIndex = findHeaderIndex(headers, BID_ID_HEADER_ALIASES);
+  const bidDateIndex = findHeaderIndex(headers, BID_DATE_HEADER_ALIASES);
+  const campaignNameIndex = findHeaderIndex(headers, ["campaign"]);
+  const campaignIdIndex = findHeaderIndex(headers, ["campaignid"]);
+  const publisherNameIndex = findHeaderIndex(headers, ["publisher"]);
+  const publisherIdIndex = findHeaderIndex(headers, ["publisherid"]);
+  const bidAmountIndex = findHeaderIndex(headers, ["bid"]);
+  const winningBidIndex = findHeaderIndex(headers, ["winningbid"]);
+  const bidRejectedIndex = findHeaderIndex(headers, ["bidrejected"]);
+  const reasonForRejectIndex = findHeaderIndex(headers, ["reasonforrejection"]);
+  const bidDidIndex = findHeaderIndex(headers, ["biddid"]);
+  const bidExpireDateIndex = findHeaderIndex(headers, ["bidexpiredate"]);
+  const expirationSecondsIndex = findHeaderIndex(headers, ["expirationinseconds"]);
+  const winningBidCallAcceptedIndex = findHeaderIndex(headers, ["winningbidcallaccepted"]);
+  const winningBidCallRejectedIndex = findHeaderIndex(headers, ["winningbidcallrejected"]);
 
   if (bidIdIndex === -1) {
     throw new Error("The RTB export CSV did not include a Bid ID column.");
@@ -533,30 +620,50 @@ export function parseRtbExportCsv(csvText: string): ParsedRtbExportCsv {
 
   const rawBidIds: string[] = [];
   const parsedBidDates: string[] = [];
+  const sourceRows: ParsedRtbExportSourceRow[] = [];
   let invalidBidIdCount = 0;
 
-  for (const row of dataRows) {
-    const bidId = (row[bidIdIndex] ?? "").trim();
+  dataRows.forEach((row, index) => {
+    const rawBidId = readNullableCell(row, bidIdIndex);
+    const parsedBidDate =
+      bidDateIndex >= 0 ? parseUtcBidDateValue(readStringCell(row, bidDateIndex)) : null;
 
-    if (!bidId) {
-      continue;
+    sourceRows.push({
+      rowNumber: index + 2,
+      bidId: rawBidId,
+      bidDt: parsedBidDate,
+      campaignName: readNullableCell(row, campaignNameIndex),
+      campaignId: readNullableCell(row, campaignIdIndex),
+      publisherName: readNullableCell(row, publisherNameIndex),
+      publisherId: readNullableCell(row, publisherIdIndex),
+      bidAmount: parseNumberCell(row, bidAmountIndex),
+      winningBid: parseNumberCell(row, winningBidIndex),
+      bidRejected: parseBooleanCell(row, bidRejectedIndex),
+      reasonForReject: readNullableCell(row, reasonForRejectIndex),
+      bidDid: readNullableCell(row, bidDidIndex),
+      bidExpireDate: readNullableCell(row, bidExpireDateIndex),
+      expirationSeconds: parseNumberCell(row, expirationSecondsIndex),
+      winningBidCallAccepted: parseBooleanCell(row, winningBidCallAcceptedIndex),
+      winningBidCallRejected: parseBooleanCell(row, winningBidCallRejectedIndex),
+      bidElapsedMs: null,
+      rowJson: buildRowJson(headers, row),
+    });
+
+    if (!rawBidId) {
+      return;
     }
 
-    if (!isValidBidId(bidId)) {
+    if (!isValidBidId(rawBidId)) {
       invalidBidIdCount += 1;
-      continue;
+      return;
     }
 
-    rawBidIds.push(bidId);
+    rawBidIds.push(rawBidId);
 
-    if (bidDateIndex >= 0) {
-      const parsedBidDate = parseUtcBidDateValue((row[bidDateIndex] ?? "").trim());
-
-      if (parsedBidDate) {
-        parsedBidDates.push(parsedBidDate);
-      }
+    if (parsedBidDate) {
+      parsedBidDates.push(parsedBidDate);
     }
-  }
+  });
 
   const { bidIds, duplicateCount } = dedupeBidIds(rawBidIds);
   const sortedBidDates = [...parsedBidDates].sort((left, right) => {
@@ -582,6 +689,7 @@ export function parseRtbExportCsv(csvText: string): ParsedRtbExportCsv {
     earliestBidDt: sortedBidDates[0] ?? null,
     headers,
     sampleBidIds: bidIds.slice(0, 10),
+    sourceRows,
   };
 }
 
@@ -871,6 +979,23 @@ export async function prepareRingbaRecentImportRun(input: {
     })) as ImportRunDetail;
 
     const parsed = parseRtbExportCsv(extracted.csvText);
+    const sourceFile = await createImportSourceFile({
+      importRunId: input.importRunId,
+      sourceType: "ringba_recent_import",
+      fileName: extracted.fileName,
+      rowCount: parsed.rowCount,
+      headerJson: parsed.headers,
+      sourceMetadata: {
+        reportStart,
+        reportEnd,
+        exportJobId,
+      },
+    });
+    await insertImportSourceRows({
+      importRunId: input.importRunId,
+      importSourceFileId: sourceFile.id,
+      rows: parsed.sourceRows,
+    });
     sourceMetadata = updateDiagnostics(sourceMetadata, {
       parsedAt: new Date().toISOString(),
       parsedRowCount: parsed.rowCount,

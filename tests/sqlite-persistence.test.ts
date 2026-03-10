@@ -132,6 +132,39 @@ describe.sequential("sqlite persistence integration", () => {
     expect(staleClaim.fetchAttemptCount).toBeGreaterThan(reusedClaim.fetchAttemptCount);
   });
 
+  it("loads investigation list items in chunks beyond SQLite variable limits", async () => {
+    await setupTestDatabase();
+    const investigations = await import("@/lib/db/investigations");
+
+    const expectedBidIds: string[] = [];
+
+    for (let index = 0; index < 1200; index += 1) {
+      const bidId = `bid-${index}`;
+      expectedBidIds.push(bidId);
+
+      await investigations.upsertInvestigation({
+        importRunId: null,
+        normalizedBid: buildNormalizedBid(bidId),
+        diagnosis: buildDiagnosis(),
+      });
+    }
+
+    const ids = expectedBidIds.map((bidId) => `missing-${bidId}`);
+    const persisted = await Promise.all(
+      expectedBidIds.map((bidId) => investigations.getInvestigationByBidId(bidId)),
+    );
+
+    persisted.forEach((row, index) => {
+      ids[index] = row?.id ?? ids[index];
+    });
+
+    const items = await investigations.getInvestigationListItemsByIds(ids);
+
+    expect(items).toHaveLength(1200);
+    expect(items.some((item) => item.bidId === "bid-0")).toBe(true);
+    expect(items.some((item) => item.bidId === "bid-1199")).toBe(true);
+  });
+
   it("reclaims stale import run items instead of leaving them stuck running", async () => {
     await setupTestDatabase();
     const db = getDb();
@@ -173,6 +206,47 @@ describe.sequential("sqlite persistence integration", () => {
       .where(eq(importRunItems.id, firstBatch[0].id))
       .get();
     expect(itemRow?.attemptCount).toBe(2);
+  });
+
+  it("reopens failed runs when queued work remains", async () => {
+    await setupTestDatabase();
+    const db = getDb();
+    const runs = await import("@/lib/db/import-runs");
+
+    const runId = await runs.createImportRun({
+      sourceType: "csv_direct_import",
+      bidIds: ["bid-1", "bid-2"],
+      forceRefresh: false,
+    });
+
+    await db
+      .update(importRuns)
+      .set({
+        status: "failed",
+        sourceStage: "failed",
+        lastError: "too many SQL variables",
+      })
+      .where(eq(importRuns.id, runId))
+      .run();
+
+    await db
+      .update(importRunItems)
+      .set({
+        status: "completed",
+        completedAt: "2026-03-09T00:00:00.000Z",
+      })
+      .where(eq(importRunItems.bidId, "bid-1"))
+      .run();
+
+    const detail = await runs.resetFailedImportRunItems({
+      importRunId: runId,
+      forceRefresh: false,
+    });
+
+    expect(detail?.status).toBe("queued");
+    expect(detail?.sourceStage).toBe("queued");
+    expect(detail?.queuedCount).toBe(1);
+    expect(detail?.lastError).toBeNull();
   });
 
   it("claims due schedules while ignoring paused schedules and stale overlap blockers", async () => {

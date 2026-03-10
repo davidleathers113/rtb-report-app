@@ -76,10 +76,13 @@ pnpm db:migrate
 | `RINGBA_ACCOUNT_ID` | Yes | Ringba account ID |
 | `RINGBA_API_TOKEN` | Yes | Ringba API token |
 | `RINGBA_API_BASE_URL` | No | Default: `https://api.ringba.com` |
-| `RINGBA_AUTH_SCHEME` | No | Default: `Token` |
+| `RINGBA_AUTH_SCHEME` | No | Default: `Token` for Ringba API access tokens |
 | `MINIMUM_REVENUE_THRESHOLD` | No | Used by diagnostics rules |
 | `IMPORT_SCHEDULES_TRIGGER_SECRET` | Prod | Secret for schedule trigger API; if unset in prod, manual trigger UI is disabled |
 | `IMPORT_SCHEDULES_SLACK_WEBHOOK_URL` | No | Slack webhook for schedule notifications |
+
+Ringba recent imports authenticate with API access tokens via `Authorization: Token ...`.
+The RTB export-create request leaves `formatTimeZone` unset by default because Ringba rejects `UTC` for that field.
 
 ## Project Structure
 

@@ -4,6 +4,8 @@
 
 Verify the real end-to-end `ringba_recent_import` flow against live Ringba data and the local SQLite database.
 
+Also verify that any Ringba data that should already be present but is missing from SQLite is identified and backfilled into the local database.
+
 This validation should confirm:
 
 - Ringba credentials are accepted
@@ -14,6 +16,7 @@ This validation should confirm:
 - bid IDs are deduped and enqueued
 - downstream investigations are fetched and persisted
 - SQLite state is updated correctly
+- missing Ringba-backed records are backfilled into SQLite
 - checkpoints only advance on successful source-stage completion
 
 ## Validation Strategy
@@ -29,6 +32,7 @@ Before testing anything, make sure:
 - `.env` contains `RINGBA_ACCOUNT_ID`
 - `.env` contains `RINGBA_API_TOKEN`
 - `.env` contains `RINGBA_API_BASE_URL` only if you intentionally override the default
+- `.env` contains `RINGBA_AUTH_SCHEME` only if you intentionally override the default `Token` scheme for Ringba API access tokens
 - `.env` contains `BID_CONSOLE_DB_PATH` only if you intentionally override the default SQLite path
 - dependencies are installed
 - the app is using the local SQLite database
@@ -152,6 +156,11 @@ This confirms:
 - CSV extraction worked
 - bid ID parsing worked
 
+Implementation note:
+
+- the export-create request should use Ringba API access tokens with `Authorization: Token ...`
+- the export-create request should not force `formatTimeZone` to `UTC`; omit the field unless you intentionally provide a Ringba-accepted IANA time zone
+
 ## Step 7: Verify import-run items were created
 
 Confirm the parsed bid IDs were actually inserted into the downstream queue.
@@ -185,7 +194,27 @@ This confirms:
 - the app is persisting investigations into SQLite
 - the downstream processor is functioning
 
-## Step 9: Verify checkpoint updates
+## Step 9: Verify there is no missing Ringba data in SQLite
+
+After the first successful run, confirm SQLite is not missing data that Ringba returned for the validated window.
+
+What to verify:
+
+- the number of deduped Ringba bid IDs for the run matches the number of `import_run_items` created for that run
+- every queued or completed item for the run has a corresponding persisted source or investigation record as expected
+- there are no obvious gaps where Ringba returned data but SQLite does not contain the matching run, item, source, or investigation rows
+
+If gaps are found:
+
+- record the missing bid IDs or row counts
+- identify whether the gap is in source parsing, item insertion, downstream processing, or investigation persistence
+- rerun or resume processing until the missing Ringba data is backfilled into SQLite
+
+Success condition:
+
+- all data returned by Ringba for the validated window is represented in SQLite, or any remaining discrepancy is fully explained
+
+## Step 10: Verify checkpoint updates
 
 After a successful run, confirm checkpointing updated correctly.
 
@@ -197,7 +226,7 @@ What to verify:
 
 This confirms future recent-import runs can resume correctly.
 
-## Step 10: Verify SQLite state directly
+## Step 11: Verify SQLite state directly
 
 Inspect the local SQLite database after the run.
 
@@ -205,6 +234,8 @@ Tables to verify:
 
 - `import_runs`
 - `import_run_items`
+- `import_source_files`
+- `import_source_rows`
 - `bid_investigations`
 - `import_source_checkpoints`
 
@@ -212,10 +243,12 @@ Expected behavior:
 
 - `import_runs` contains source-stage progression and diagnostics
 - `import_run_items` contains the queued deduped bid IDs
+- `import_source_files` and `import_source_rows` reflect the source data that was downloaded and parsed
 - `bid_investigations` contains fetched or reused investigations
+- any data that was previously missing from SQLite has now been inserted
 - `import_source_checkpoints` reflects successful source completion
 
-## Step 11: Verify the UI reflects reality
+## Step 12: Verify the UI reflects reality
 
 Open the app in the browser and confirm the same run visually.
 
@@ -228,7 +261,7 @@ What to verify:
 - imported items and investigations appear as expected
 - nothing looks disconnected between API state and UI state
 
-## Step 12: Classify the outcome
+## Step 13: Classify the outcome
 
 ### Successful integration
 
@@ -239,6 +272,7 @@ All of these are true:
 - ZIP and CSV processing succeeded
 - bid IDs were inserted
 - investigations persisted
+- no expected Ringba data is missing from SQLite
 - checkpoint updated
 
 ### Working integration, but no recent bids
@@ -260,10 +294,11 @@ Examples:
 - ZIP or CSV parsing failed
 - items were parsed but not inserted
 - items were inserted but investigations never processed
+- Ringba returned data but SQLite still has missing records after processing
 
 This needs targeted debugging.
 
-## Step 13: If it fails, debug in the right order
+## Step 14: If it fails, debug in the right order
 
 Use this order so you do not chase the wrong issue.
 
@@ -303,7 +338,16 @@ Check:
 - the Ringba bid-detail fetch path
 - investigation persistence logic
 
-## Step 14: Repeat once with a larger window
+### If Ringba data exists but SQLite is still missing rows
+
+Check:
+
+- whether `import_source_rows` is missing parsed source data
+- whether `import_run_items` counts are lower than the deduped Ringba result
+- whether processing stopped before all queued items completed
+- whether failed or interrupted runs need to be resumed to backfill the missing data
+
+## Step 15: Repeat once with a larger window
 
 If the 5-minute test succeeds or cleanly returns no rows, run one more validation with a larger window.
 
@@ -317,8 +361,15 @@ This helps distinguish:
 - true integration issues
 - low recent volume
 - scale or parsing issues
+- backfill gaps that only show up when more Ringba data is returned
 
-## Step 15: Optional schedule verification
+If the larger-window run returns additional Ringba data that is not already present in SQLite:
+
+- let the run finish completely
+- verify the newly returned data is now inserted into SQLite
+- if needed, repeat with another safe window until the missing historical slice has been backfilled
+
+## Step 16: Optional schedule verification
 
 Only after manual recent-import works, test the scheduled flow.
 
@@ -330,13 +381,14 @@ What to do:
 
 Do not test scheduling first.
 
-## Step 16: Record the results
+## Step 17: Record the results
 
 At the end, write down:
 
 - whether Ringba credentials worked
 - whether recent import worked end to end
 - whether SQLite persisted everything correctly
+- whether any previously missing Ringba data had to be backfilled into SQLite
 - whether checkpointing updated
 - whether the UI matched backend state
 - what failed, if anything

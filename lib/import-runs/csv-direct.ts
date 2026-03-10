@@ -547,6 +547,7 @@ export async function previewCsvDirectUpload(input: { file: File }) {
 
   const previewAccumulator = createCsvDirectPreviewAccumulator(input.file.name);
   let hasDataRows = false;
+  let parsedRowCount = 0;
 
   await streamCsvRows({
     file: input.file,
@@ -554,6 +555,13 @@ export async function previewCsvDirectUpload(input: { file: File }) {
       previewAccumulator.setHeaders(header);
     },
     onRow: async (row, rowNumber, headerRow, headerMap) => {
+      parsedRowCount += 1;
+      if (parsedRowCount > MAX_CSV_DIRECT_ROWS) {
+        throw new Error(
+          `The uploaded CSV exceeds the ${MAX_CSV_DIRECT_ROWS} row limit for direct import.`,
+        );
+      }
+
       hasDataRows = true;
       previewAccumulator.addRow(
         buildParsedRow({
@@ -603,6 +611,9 @@ async function streamCsvRows(input: {
         return;
       }
       settled = true;
+      stream.unpipe(parser);
+      parser.destroy();
+      stream.destroy();
       reject(error);
     }
 
@@ -624,7 +635,9 @@ async function streamCsvRows(input: {
           ? ((data as { data?: unknown }).data as string[])
           : null;
       if (!row) {
-        parser.resume();
+        if (!settled) {
+          parser.resume();
+        }
         return;
       }
       rowNumber += 1;
@@ -640,7 +653,9 @@ async function streamCsvRows(input: {
           return;
         }
         input.onHeader(headerRow);
-        parser.resume();
+        if (!settled) {
+          parser.resume();
+        }
         return;
       }
       const map = headerMap;
@@ -653,7 +668,9 @@ async function streamCsvRows(input: {
         .onRow(row.map((value) => String(value ?? "")), rowNumber, headerRow, map)
         .then(() => {
           pendingRows -= 1;
-          parser.resume();
+          if (!settled) {
+            parser.resume();
+          }
           settleIfDone();
         })
         .catch((error) => {

@@ -838,14 +838,19 @@ export async function resetFailedImportRunItems(input: {
   const db = getDb();
   const now = nowIso();
   const existingItems = await getImportRunItemRows(input.importRunId);
-  const failedItems = existingItems.filter((item) => item.status === "failed");
+  const itemsToRequeue = existingItems.filter((item) => {
+    return item.status === "failed" || item.status === "running";
+  });
+  const hasPendingWork = existingItems.some((item) => {
+    return item.status === "queued" || item.status === "failed" || item.status === "running";
+  });
 
-  if (failedItems.length === 0) {
+  if (!hasPendingWork) {
     return getImportRunDetail(input.importRunId);
   }
 
-  const failedIds = failedItems.map((item) => item.id);
-  if (failedIds.length > 0) {
+  const itemIdsToRequeue = itemsToRequeue.map((item) => item.id);
+  if (itemIdsToRequeue.length > 0) {
     db.update(importRunItems)
       .set({
         status: "queued",
@@ -857,7 +862,7 @@ export async function resetFailedImportRunItems(input: {
         leaseExpiresAt: null,
         updatedAt: now,
       })
-      .where(inArray(importRunItems.id, failedIds))
+      .where(inArray(importRunItems.id, itemIdsToRequeue))
       .run();
   }
 

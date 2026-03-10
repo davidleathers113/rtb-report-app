@@ -23,6 +23,18 @@ import type {
   NormalizedBidData,
 } from "@/types/bid";
 
+const SQLITE_IN_ARRAY_CHUNK_SIZE = 900;
+
+function splitIntoChunks<T>(values: T[], chunkSize: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+
+  return chunks;
+}
+
 function toListItem(row: BidInvestigationRow): InvestigationListItem {
   return {
     id: row.id,
@@ -669,11 +681,16 @@ export async function getInvestigationListItemsByIds(ids: string[]) {
   }
 
   const db = getDb();
-  const rows = db
-    .select()
-    .from(bidInvestigations)
-    .where(inArray(bidInvestigations.id, uniqueIds))
-    .all() as BidInvestigationRow[];
+  const rows: BidInvestigationRow[] = [];
+
+  for (const chunk of splitIntoChunks(uniqueIds, SQLITE_IN_ARRAY_CHUNK_SIZE)) {
+    const chunkRows = db
+      .select()
+      .from(bidInvestigations)
+      .where(inArray(bidInvestigations.id, chunk))
+      .all() as BidInvestigationRow[];
+    rows.push(...chunkRows);
+  }
 
   return rows.map(toListItem);
 }
