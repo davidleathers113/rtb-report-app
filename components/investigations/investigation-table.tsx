@@ -63,6 +63,22 @@ function fetchStatusVariant(fetchStatus: InvestigationListItem["fetchStatus"]) {
   return "warning";
 }
 
+function parseStatusVariant(parseStatus: InvestigationListItem["parseStatus"]) {
+  if (parseStatus === "complete") {
+    return "success";
+  }
+
+  if (parseStatus === "text_fallback") {
+    return "warning";
+  }
+
+  if (parseStatus === "partial" || parseStatus === "shape_unknown") {
+    return "destructive";
+  }
+
+  return "default";
+}
+
 function failureStageVariant(stage: InvestigationListItem["primaryFailureStage"]) {
   if (stage === "accepted") {
     return "success";
@@ -74,6 +90,27 @@ function failureStageVariant(stage: InvestigationListItem["primaryFailureStage"]
 
   if (stage === "target_rejected" || stage === "fetch_failed") {
     return "destructive";
+  }
+
+  return "default";
+}
+
+function classificationVariant(category: InvestigationListItem["outcomeReasonCategory"]) {
+  if (category === "accepted") {
+    return "success";
+  }
+
+  if (
+    category === "missing_caller_id" ||
+    category === "missing_required_field" ||
+    category === "request_invalid" ||
+    category === "rate_limited"
+  ) {
+    return "destructive";
+  }
+
+  if (category) {
+    return "warning";
   }
 
   return "default";
@@ -133,6 +170,18 @@ const columns: ColumnDef<InvestigationListItem>[] = [
     ),
   },
   {
+    accessorKey: "outcomeReasonCategory",
+    header: "Outcome Reason",
+    cell: ({ row }) =>
+      row.original.outcomeReasonCategory ? (
+        <Badge variant={classificationVariant(row.original.outcomeReasonCategory)}>
+          {toSentenceCase(row.original.outcomeReasonCategory)}
+        </Badge>
+      ) : (
+        "-"
+      ),
+  },
+  {
     accessorKey: "primaryTargetName",
     header: "Failing Target",
     cell: ({ row }) => row.original.primaryTargetName ?? row.original.targetName ?? "-",
@@ -158,6 +207,22 @@ const columns: ColumnDef<InvestigationListItem>[] = [
     accessorKey: "primaryErrorCode",
     header: "Error Code",
     cell: ({ row }) => row.original.primaryErrorCode ?? "-",
+  },
+  {
+    accessorKey: "parseStatus",
+    header: "Parser",
+    cell: ({ row }) => (
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={parseStatusVariant(row.original.parseStatus)}>
+          {toSentenceCase(row.original.parseStatus)}
+        </Badge>
+        {row.original.normalizationWarningCount > 0 ? (
+          <span className="text-xs text-amber-700">
+            {row.original.normalizationWarningCount} warn
+          </span>
+        ) : null}
+      </div>
+    ),
   },
   {
     accessorKey: "ownerType",
@@ -304,8 +369,22 @@ export function InvestigationTable({
                           <Badge variant={failureStageVariant(detail.primaryFailureStage)}>
                             {toSentenceCase(detail.primaryFailureStage)}
                           </Badge>
+                          {detail.outcomeReasonCategory ? (
+                            <Badge variant={classificationVariant(detail.outcomeReasonCategory)}>
+                              {toSentenceCase(detail.outcomeReasonCategory)}
+                            </Badge>
+                          ) : null}
+                          <Badge variant={parseStatusVariant(detail.parseStatus)}>
+                            Parse {toSentenceCase(detail.parseStatus)}
+                          </Badge>
                           {detail.primaryErrorCode !== null ? (
                             <Badge variant="destructive">Code {detail.primaryErrorCode}</Badge>
+                          ) : null}
+                          {detail.normalizationWarnings.length > 0 ? (
+                            <span className="text-sm text-amber-700">
+                              {detail.normalizationWarnings.length} parser warning
+                              {detail.normalizationWarnings.length === 1 ? "" : "s"}
+                            </span>
                           ) : null}
                           {detail.fetchedAt ? (
                             <span className="text-sm text-slate-500">
@@ -322,7 +401,8 @@ export function InvestigationTable({
                           <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-700">
                             <span className="font-medium text-slate-900">Primary failure:</span>{" "}
                             {detail.primaryTargetName ?? detail.targetName ?? "Unknown target"} -{" "}
-                            {detail.primaryErrorMessage ??
+                            {detail.outcomeReasonMessage ??
+                              detail.primaryErrorMessage ??
                               detail.reasonForReject ??
                               detail.explanation}
                           </div>
@@ -339,6 +419,43 @@ export function InvestigationTable({
                             Response Body
                           </p>
                           <JsonView value={detail.responseBody} />
+                        </div>
+                        <div className="space-y-2">
+                          <p className="text-sm font-semibold text-slate-900">
+                            Parser Summary
+                          </p>
+                          <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-4 text-sm text-slate-600">
+                            <div>
+                              <span className="font-medium text-slate-900">Classification:</span>{" "}
+                              {detail.outcomeReasonCategory
+                                ? toSentenceCase(detail.outcomeReasonCategory)
+                                : "-"}
+                            </div>
+                            <div>
+                              <span className="font-medium text-slate-900">Classified from:</span>{" "}
+                              {detail.classificationSource ?? "-"}
+                            </div>
+                            <div>
+                              <span className="font-medium text-slate-900">Classification confidence:</span>{" "}
+                              {detail.classificationConfidence === null
+                                ? "-"
+                                : `${Math.round(detail.classificationConfidence * 100)}%`}
+                            </div>
+                            <div>
+                              <span className="font-medium text-slate-900">Schema:</span>{" "}
+                              {detail.schemaVariant ?? "-"}
+                            </div>
+                            <div>
+                              <span className="font-medium text-slate-900">Confidence:</span>{" "}
+                              {detail.normalizationConfidence === null
+                                ? "-"
+                                : `${Math.round(detail.normalizationConfidence * 100)}%`}
+                            </div>
+                            <div>
+                              <span className="font-medium text-slate-900">Error source:</span>{" "}
+                              {detail.primaryErrorCodeSource ?? "-"}
+                            </div>
+                          </div>
                         </div>
                         <div className="space-y-2">
                           <p className="text-sm font-semibold text-slate-900">Evidence</p>
@@ -362,6 +479,48 @@ export function InvestigationTable({
                           </p>
                           <JsonView value={detail.rawTraceJson} />
                         </div>
+                        {detail.normalizationWarnings.length > 0 ? (
+                          <div className="space-y-2 lg:col-span-2">
+                            <p className="text-sm font-semibold text-slate-900">
+                              Parser Warnings
+                            </p>
+                            <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-4">
+                              {detail.normalizationWarnings.map((warning, index) => (
+                                <div
+                                  key={`${warning.code}-${warning.field ?? "none"}-${index}`}
+                                  className="text-sm text-slate-600"
+                                >
+                                  <span className="font-medium text-slate-900">
+                                    {warning.code}:
+                                  </span>{" "}
+                                  {warning.message}
+                                  {warning.field ? ` (${warning.field})` : ""}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {detail.classificationWarnings.length > 0 ? (
+                          <div className="space-y-2 lg:col-span-2">
+                            <p className="text-sm font-semibold text-slate-900">
+                              Classification Warnings
+                            </p>
+                            <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-4">
+                              {detail.classificationWarnings.map((warning, index) => (
+                                <div
+                                  key={`${warning.code}-${warning.field ?? "none"}-${index}`}
+                                  className="text-sm text-slate-600"
+                                >
+                                  <span className="font-medium text-slate-900">
+                                    {warning.code}:
+                                  </span>{" "}
+                                  {warning.message}
+                                  {warning.field ? ` (${warning.field})` : ""}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                       </div>
                     ) : (

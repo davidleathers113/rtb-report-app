@@ -1,0 +1,6 @@
+# Custom LLM exclusions
+pnpm-lock.yaml
+*.svg
+public/
+tests/mocks/
+repomix-output.md

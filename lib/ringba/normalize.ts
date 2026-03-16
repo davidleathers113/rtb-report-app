@@ -1,15 +1,85 @@
 import type {
   BidEvent,
   BidTargetAttempt,
+  ClassificationSource,
+  ClassificationWarning,
   FailureStage,
   InvestigationOutcome,
+  NormalizationParseStatus,
+  NormalizationWarning,
   NormalizedBidData,
+  OutcomeReasonCategory,
 } from "@/types/bid";
 import type { RingbaFetchResult } from "@/lib/ringba/client";
 import { isRecord, safeJsonParse, stringifyJson } from "@/lib/utils/json";
 
+const NORMALIZATION_VERSION = "ringba-normalizer-v2";
+const KNOWN_EVENT_NAMES = new Set([
+  "PingRAWResult",
+  "PingTreePingingSummary",
+  "CallPlanDetail",
+  "ZeroRTBBid",
+]);
+
+interface SourceDescriptor {
+  label: string;
+  value: Record<string, unknown> | undefined;
+}
+
+interface ResolvedValue {
+  value: unknown;
+  path: string;
+  sourceLabel: string;
+}
+
+interface ErrorCodeCandidate {
+  code: number;
+  source: string;
+  confidence: number;
+  rawMatch: string | null;
+}
+
+interface ErrorDetails {
+  errorCode: number | null;
+  errorMessage: string | null;
+  errors: string[];
+  errorCodeSource: string | null;
+  errorCodeConfidence: number | null;
+  errorCodeRawMatch: string | null;
+  usedTextFallback: boolean;
+}
+
+interface ParsedTargetAttempt extends BidTargetAttempt {
+  errorCodeSource: string | null;
+  errorCodeConfidence: number | null;
+  errorCodeRawMatch: string | null;
+  usedTextFallback: boolean;
+}
+
+interface ParsedRingbaBidDetail {
+  body: Record<string, unknown> | undefined;
+  record: Record<string, unknown> | undefined;
+  sources: SourceDescriptor[];
+  relevantEvents: BidEvent[];
+  targetAttempts: ParsedTargetAttempt[];
+  traceJson: Record<string, unknown> | null;
+  schemaVariant: string | null;
+  warnings: NormalizationWarning[];
+  unknownEventNames: string[];
+}
+
+interface BidDisposition {
+  outcome: InvestigationOutcome;
+  outcomeReasonCategory: OutcomeReasonCategory | null;
+  outcomeReasonCode: string | null;
+  outcomeReasonMessage: string | null;
+  classificationSource: ClassificationSource | null;
+  classificationConfidence: number | null;
+  classificationWarnings: ClassificationWarning[];
+}
+
 function readPath(
-  source: Record<string, unknown> | undefined,
+  source: Record<string, unknown> | unknown[] | undefined,
   path: string,
 ): unknown {
   if (!source) {
@@ -20,11 +90,22 @@ function readPath(
   let current: unknown = source;
 
   for (const part of parts) {
-    if (!isRecord(current)) {
-      return undefined;
+    if (Array.isArray(current)) {
+      const index = Number(part);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) {
+        return undefined;
+      }
+
+      current = current[index];
+      continue;
     }
 
-    current = current[part];
+    if (isRecord(current)) {
+      current = current[part];
+      continue;
+    }
+
+    return undefined;
   }
 
   return current;
@@ -53,18 +134,156 @@ function pickFirstValue(
   return null;
 }
 
-function pickFirstValueFromSources(
-  sources: Array<Record<string, unknown> | undefined>,
+function addWarning(
+  warnings: NormalizationWarning[],
+  warning: NormalizationWarning,
+) {
+  const exists = warnings.some(
+    (entry) =>
+      entry.code === warning.code &&
+      entry.field === warning.field &&
+      entry.message === warning.message,
+  );
+
+  if (!exists) {
+    warnings.push(warning);
+  }
+}
+
+function isJsonLikeString(value: string) {
+  const trimmed = value.trim();
+  return trimmed.startsWith("{") || trimmed.startsWith("[");
+}
+
+function parseJsonString(value: string): { ok: true; parsed: unknown } | { ok: false } {
+  try {
+    return {
+      ok: true,
+      parsed: JSON.parse(value),
+    };
+  } catch {
+    return {
+      ok: false,
+    };
+  }
+}
+
+function parseStructuredValue(
+  value: unknown,
+  field: string,
+  warnings: NormalizationWarning[],
+) {
+  if (isRecord(value) || Array.isArray(value)) {
+    return value;
+  }
+
+  if (typeof value !== "string" || !value.trim()) {
+    return value ?? null;
+  }
+
+  const trimmed = value.trim();
+  if (!isJsonLikeString(trimmed)) {
+    return value;
+  }
+
+  const parsed = parseJsonString(trimmed);
+  if (!parsed.ok) {
+    addWarning(warnings, {
+      code: "json_parse_failed",
+      message: `Failed to parse JSON for ${field}.`,
+      field,
+    });
+    return value;
+  }
+
+  return parsed.parsed;
+}
+
+function buildSourcePath(sourceLabel: string, path: string) {
+  return sourceLabel ? `${sourceLabel}.${path}` : path;
+}
+
+function pushPathUsage(
+  rawPathsUsed: Record<string, string[]>,
+  field: string,
+  sourcePath: string,
+) {
+  if (!sourcePath) {
+    return;
+  }
+
+  const existing = rawPathsUsed[field] ?? [];
+  if (!existing.includes(sourcePath)) {
+    rawPathsUsed[field] = [...existing, sourcePath];
+  }
+}
+
+function resolveFirstValue(
+  source: Record<string, unknown> | undefined,
+  sourceLabel: string,
   paths: string[],
-): unknown {
-  for (const source of sources) {
-    const value = pickFirstValue(source, paths);
-    if (value !== null) {
-      return value;
+): ResolvedValue | null {
+  for (const path of paths) {
+    const value = readPath(source, path);
+    if (value !== undefined && value !== null && value !== "") {
+      return {
+        value,
+        path,
+        sourceLabel,
+      };
     }
   }
 
   return null;
+}
+
+function resolveFirstValueFromSources(
+  sources: SourceDescriptor[],
+  paths: string[],
+): ResolvedValue | null {
+  for (const source of sources) {
+    const resolved = resolveFirstValue(source.value, source.label, paths);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+function getValueFromSources(
+  sources: SourceDescriptor[],
+  rawPathsUsed: Record<string, string[]>,
+  field: string,
+  paths: string[],
+) {
+  const resolved = resolveFirstValueFromSources(sources, paths);
+  if (!resolved) {
+    return null;
+  }
+
+  pushPathUsage(rawPathsUsed, field, buildSourcePath(resolved.sourceLabel, resolved.path));
+  return resolved.value;
+}
+
+function cleanIdentifier(value: string) {
+  return value
+    .toLowerCase()
+    .split("_")
+    .join("")
+    .split("-")
+    .join("")
+    .split(" ")
+    .join("");
+}
+
+function isErrorCodeKey(key: string) {
+  const cleaned = cleanIdentifier(key);
+  return cleaned === "code" || cleaned === "errorcode";
+}
+
+function isErrorStatusCodeKey(key: string) {
+  return cleanIdentifier(key) === "statuscode";
 }
 
 function toStringValue(value: unknown) {
@@ -88,6 +307,33 @@ function toNumberValue(value: unknown) {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) {
       return parsed;
+    }
+  }
+
+  return null;
+}
+
+function toBooleanValue(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "number") {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true" || normalized === "yes" || normalized === "1") {
+      return true;
+    }
+    if (normalized === "false" || normalized === "no" || normalized === "0") {
+      return false;
     }
   }
 
@@ -162,6 +408,430 @@ function toStringArray(value: unknown) {
   return values;
 }
 
+function toLowerString(value: string | null) {
+  return value ? value.toLowerCase() : "";
+}
+
+function collectTextFragments(value: unknown, fragments: string[], depth = 0) {
+  if (depth > 4 || value === null || value === undefined) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed) {
+      fragments.push(trimmed);
+    }
+    return;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    fragments.push(String(value));
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectTextFragments(entry, fragments, depth + 1);
+    }
+    return;
+  }
+
+  if (isRecord(value)) {
+    for (const entry of Object.values(value)) {
+      collectTextFragments(entry, fragments, depth + 1);
+    }
+  }
+}
+
+function joinStructuredText(value: unknown) {
+  const fragments: string[] = [];
+  collectTextFragments(value, fragments);
+  return fragments.join(" | ");
+}
+
+function getStructuredStatusText(responseRecord: Record<string, unknown> | undefined) {
+  return toStringValue(
+    pickFirstValue(responseRecord, [
+      "status",
+      "error",
+      "error.status",
+      "error.message",
+      "message",
+      "description",
+      "reason",
+    ]),
+  );
+}
+
+function extractReasonCodeFromText(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const candidate = findCodeInText(value, "reason_for_reject_text");
+  return candidate ? String(candidate.code) : null;
+}
+
+function buildDisposition(input: {
+  outcomeReasonCategory: OutcomeReasonCategory;
+  outcomeReasonCode?: string | null;
+  outcomeReasonMessage?: string | null;
+  classificationSource: ClassificationSource;
+  classificationConfidence: number;
+  classificationWarnings?: ClassificationWarning[];
+}) {
+  return {
+    outcome: deriveLegacyOutcome(input.outcomeReasonCategory),
+    outcomeReasonCategory: input.outcomeReasonCategory,
+    outcomeReasonCode: input.outcomeReasonCode ?? null,
+    outcomeReasonMessage: input.outcomeReasonMessage ?? null,
+    classificationSource: input.classificationSource,
+    classificationConfidence: roundConfidence(input.classificationConfidence),
+    classificationWarnings: input.classificationWarnings ?? [],
+  } satisfies BidDisposition;
+}
+
+function deriveLegacyOutcome(
+  outcomeReasonCategory: OutcomeReasonCategory | null,
+): InvestigationOutcome {
+  if (outcomeReasonCategory === "accepted") {
+    return "accepted";
+  }
+
+  if (
+    outcomeReasonCategory === "missing_required_field" ||
+    outcomeReasonCategory === "missing_caller_id" ||
+    outcomeReasonCategory === "request_invalid" ||
+    outcomeReasonCategory === "rate_limited"
+  ) {
+    return "rejected";
+  }
+
+  if (
+    outcomeReasonCategory === "buyer_returned_zero_bid" ||
+    outcomeReasonCategory === "tag_filtered_initial" ||
+    outcomeReasonCategory === "tag_filtered_final" ||
+    outcomeReasonCategory === "no_matching_buyer" ||
+    outcomeReasonCategory === "no_capacity" ||
+    outcomeReasonCategory === "unknown_no_payable_bid"
+  ) {
+    return "zero_bid";
+  }
+
+  return "unknown";
+}
+
+function buildClassificationConflictWarning(
+  structuredMessage: string | null,
+  reasonForReject: string | null,
+): ClassificationWarning | null {
+  if (!structuredMessage || !reasonForReject) {
+    return null;
+  }
+
+  const structuredLower = toLowerString(structuredMessage);
+  const rejectLower = toLowerString(reasonForReject);
+  if (!structuredLower || !rejectLower || structuredLower === rejectLower) {
+    return null;
+  }
+
+  if (structuredLower.includes(rejectLower) || rejectLower.includes(structuredLower)) {
+    return null;
+  }
+
+  return {
+    code: "classification_conflict",
+    message:
+      "Structured response details disagreed with the top-level reject reason, so the structured response was preferred.",
+    field: "reasonForReject",
+  };
+}
+
+function classifyStructuredResponse(input: {
+  responseRecord: Record<string, unknown> | undefined;
+  reasonForReject: string | null;
+  defaultSource: ClassificationSource;
+  defaultConfidence: number;
+  fallbackCode: string | null;
+  fallbackMessage: string | null;
+}): BidDisposition | null {
+  const responseRecord = input.responseRecord;
+  if (!responseRecord) {
+    return null;
+  }
+
+  const statusText = getStructuredStatusText(responseRecord);
+  const responseText = joinStructuredText(responseRecord);
+  const responseTextLower = toLowerString(responseText);
+  const structuredMessage =
+    resolveStructuredErrorMessage(responseRecord) ??
+    toStringValue(pickFirstValue(responseRecord, ["rejectReason", "status", "message"])) ??
+    input.fallbackMessage;
+  const structuredCodeCandidate = collectStructuredErrorCandidates(
+    responseRecord,
+    input.defaultSource,
+  )[0];
+  const structuredCode = structuredCodeCandidate
+    ? String(structuredCodeCandidate.code)
+    : input.fallbackCode;
+  const warnings: ClassificationWarning[] = [];
+  const conflictWarning = buildClassificationConflictWarning(
+    structuredMessage,
+    input.reasonForReject,
+  );
+  if (conflictWarning) {
+    warnings.push(conflictWarning);
+  }
+
+  if (
+    statusText === "caller_id_required" ||
+    responseTextLower.includes("caller_id_required") ||
+    (responseTextLower.includes("caller_id") && responseTextLower.includes("requires it"))
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "missing_caller_id",
+      outcomeReasonCode: structuredCode ?? statusText ?? "caller_id_required",
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (statusText === "no_matching_buyer" || responseTextLower.includes("no matching buyers")) {
+    return buildDisposition({
+      outcomeReasonCategory: "no_matching_buyer",
+      outcomeReasonCode: structuredCode ?? statusText,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (
+    responseTextLower.includes("rate limit") ||
+    responseTextLower.includes("too many requests") ||
+    structuredCode === "1024" ||
+    structuredCode === "1025" ||
+    structuredCode === "1026"
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "rate_limited",
+      outcomeReasonCode: structuredCode,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (
+    structuredCode === "3024" ||
+    responseTextLower.includes("is required on ping") ||
+    responseTextLower.includes("required tag") ||
+    (responseTextLower.includes("required") && responseTextLower.includes("zip"))
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "missing_required_field",
+      outcomeReasonCode: structuredCode ?? statusText,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (
+    (statusText === "422" || responseTextLower.includes("unprocessable")) &&
+    (responseTextLower.includes("required") || responseTextLower.includes("invalid"))
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "request_invalid",
+      outcomeReasonCode: structuredCode ?? statusText,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (structuredCode === "1002" || responseTextLower.includes("initial tag filter")) {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_initial",
+      outcomeReasonCode: structuredCode ?? "1002",
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (
+    structuredCode === "1005" ||
+    structuredCode === "1006" ||
+    responseTextLower.includes("final capacity check") ||
+    responseTextLower.includes("final tag filter")
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_final",
+      outcomeReasonCode: structuredCode ?? "1006",
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (structuredCode === "1003" || responseTextLower.includes("no capacity")) {
+    return buildDisposition({
+      outcomeReasonCategory: "no_capacity",
+      outcomeReasonCode: structuredCode ?? "1003",
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: input.defaultConfidence,
+      classificationWarnings: warnings,
+    });
+  }
+
+  if (
+    structuredCode !== null ||
+    statusText !== null ||
+    responseTextLower.includes("success\":false") ||
+    responseTextLower.includes("rejected request")
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "request_invalid",
+      outcomeReasonCode: structuredCode ?? statusText,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: Math.min(input.defaultConfidence, 0.82),
+      classificationWarnings: warnings,
+    });
+  }
+
+  const responseBidAmount = toNumberValue(
+    pickFirstValue(responseRecord, ["bidAmount", "acceptedBid", "winningBid"]),
+  );
+  if (
+    responseBidAmount === 0 ||
+    responseTextLower.includes("zero bid") ||
+    responseTextLower.includes("no bid")
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "buyer_returned_zero_bid",
+      outcomeReasonCode: structuredCode,
+      outcomeReasonMessage: structuredMessage,
+      classificationSource: input.defaultSource,
+      classificationConfidence: Math.min(input.defaultConfidence, 0.84),
+      classificationWarnings: warnings,
+    });
+  }
+
+  return null;
+}
+
+function classifyFromPrimaryErrorCode(input: {
+  code: number | null;
+  message: string | null;
+  source: string | null;
+}) {
+  if (input.code === null) {
+    return null;
+  }
+
+  const code = String(input.code);
+  if (code === "1002") {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_initial",
+      outcomeReasonCode: code,
+      outcomeReasonMessage: input.message,
+      classificationSource: "primary_attempt_error_code",
+      classificationConfidence: 0.9,
+    });
+  }
+
+  if (code === "1005" || code === "1006") {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_final",
+      outcomeReasonCode: code,
+      outcomeReasonMessage: input.message,
+      classificationSource: input.source === "reasonForReject_text"
+        ? "reason_for_reject_text"
+        : "primary_attempt_error_code",
+      classificationConfidence: input.source === "reasonForReject_text" ? 0.62 : 0.9,
+    });
+  }
+
+  if (code === "1003") {
+    return buildDisposition({
+      outcomeReasonCategory: "no_capacity",
+      outcomeReasonCode: code,
+      outcomeReasonMessage: input.message,
+      classificationSource: "primary_attempt_error_code",
+      classificationConfidence: 0.9,
+    });
+  }
+
+  if (code === "1024" || code === "1025" || code === "1026") {
+    return buildDisposition({
+      outcomeReasonCategory: "rate_limited",
+      outcomeReasonCode: code,
+      outcomeReasonMessage: input.message,
+      classificationSource: "primary_attempt_error_code",
+      classificationConfidence: 0.9,
+    });
+  }
+
+  return null;
+}
+
+function classifyFromReasonForReject(reasonForReject: string | null) {
+  const lowerReason = toLowerString(reasonForReject);
+  if (!lowerReason) {
+    return null;
+  }
+
+  const reasonCode = extractReasonCodeFromText(reasonForReject);
+  if (lowerReason.includes("initial tag filter") || reasonCode === "1002") {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_initial",
+      outcomeReasonCode: reasonCode ?? "1002",
+      outcomeReasonMessage: reasonForReject,
+      classificationSource: "reason_for_reject_text",
+      classificationConfidence: 0.62,
+    });
+  }
+
+  if (
+    lowerReason.includes("final capacity check") ||
+    lowerReason.includes("final tag filter") ||
+    reasonCode === "1005" ||
+    reasonCode === "1006"
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "tag_filtered_final",
+      outcomeReasonCode: reasonCode ?? "1006",
+      outcomeReasonMessage: reasonForReject,
+      classificationSource: "reason_for_reject_text",
+      classificationConfidence: 0.6,
+    });
+  }
+
+  if (lowerReason.includes("zero bid") || lowerReason.includes("no bid")) {
+    return buildDisposition({
+      outcomeReasonCategory: "buyer_returned_zero_bid",
+      outcomeReasonCode: reasonCode,
+      outcomeReasonMessage: reasonForReject,
+      classificationSource: "reason_for_reject_text",
+      classificationConfidence: 0.56,
+    });
+  }
+
+  return null;
+}
+
 function toNameValueMap(value: unknown) {
   const mapped: Record<string, unknown> = {};
 
@@ -204,7 +874,11 @@ function getPrimaryRecord(body: Record<string, unknown> | undefined) {
   return body;
 }
 
-function parseTraceValue(value: unknown) {
+function parseTraceValue(
+  value: unknown,
+  field: string,
+  warnings: NormalizationWarning[],
+) {
   if (isRecord(value)) {
     return value;
   }
@@ -214,55 +888,143 @@ function parseTraceValue(value: unknown) {
     return isRecord(parsed) ? parsed : null;
   }
 
+  if (value !== null && value !== undefined) {
+    addWarning(warnings, {
+      code: "trace_parse_failed",
+      message: `Failed to parse trace JSON for ${field}.`,
+      field,
+    });
+  }
+
   return null;
 }
 
-function parseStructuredBody(value: unknown) {
-  if (isRecord(value) || Array.isArray(value)) {
-    return value;
+function collectStructuredErrorCandidates(
+  value: Record<string, unknown> | undefined,
+  baseSource: string,
+): ErrorCodeCandidate[] {
+  if (!value) {
+    return [];
   }
 
-  if (typeof value !== "string" || !value.trim()) {
-    return value ?? null;
+  const candidates: ErrorCodeCandidate[] = [];
+  const directPaths = [
+    { path: "error.code", confidence: 1 },
+    { path: "code", confidence: 0.98 },
+    { path: "errorCode", confidence: 0.98 },
+    { path: "error.errorCode", confidence: 0.98 },
+    { path: "error.statusCode", confidence: 0.9 },
+  ];
+
+  for (const directPath of directPaths) {
+    const resolved = resolveFirstValue(value, baseSource, [directPath.path]);
+    const parsed = toNumberValue(resolved?.value ?? null);
+    if (resolved && parsed !== null) {
+      candidates.push({
+        code: parsed,
+        source: buildSourcePath(resolved.sourceLabel, resolved.path),
+        confidence: directPath.confidence,
+        rawMatch: null,
+      });
+    }
   }
 
-  return safeJsonParse(value);
+  const errorArrays = ["errors", "error.errors"];
+
+  for (const errorArray of errorArrays) {
+    const entries = readArrayPath(value, errorArray);
+    if (!entries) {
+      continue;
+    }
+
+    for (const [index, entry] of entries.entries()) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+
+      for (const [key, nestedValue] of Object.entries(entry)) {
+        const parsed = toNumberValue(nestedValue);
+        if (parsed === null) {
+          continue;
+        }
+
+        if (isErrorCodeKey(key) || isErrorStatusCodeKey(key)) {
+          candidates.push({
+            code: parsed,
+            source: `${baseSource}.${errorArray}[${index}].${key}`,
+            confidence: 0.94,
+            rawMatch: null,
+          });
+        }
+      }
+    }
+  }
+
+  return candidates;
 }
 
-function extractErrorCodeFromText(value: string | null) {
+function findCodeInText(value: string | null, source: string): ErrorCodeCandidate | null {
   if (!value) {
     return null;
   }
 
-  const markers = ["(Code:", "Code:", "\"code\":", "'code':"];
+  const lowerValue = value.toLowerCase();
+  const markers = [
+    "(code:",
+    "code:",
+    "code=",
+    "\"code\":",
+    "'code':",
+    "error_code:",
+    "error code",
+    "status code",
+    "status_code:",
+  ];
+  const skippable = new Set([" ", "\t", "\n", "\r", ":", "=", "\"", "'", "[", "]", "(", ")"]);
 
   for (const marker of markers) {
-    const markerIndex = value.indexOf(marker);
-    if (markerIndex === -1) {
-      continue;
-    }
+    let searchIndex = 0;
 
-    let index = markerIndex + marker.length;
-    while (index < value.length && value[index] === " ") {
-      index += 1;
-    }
-
-    let digits = "";
-    while (index < value.length) {
-      const character = value[index];
-      const code = character.charCodeAt(0);
-      if (code < 48 || code > 57) {
+    while (searchIndex < lowerValue.length) {
+      const markerIndex = lowerValue.indexOf(marker, searchIndex);
+      if (markerIndex === -1) {
         break;
       }
-      digits += character;
-      index += 1;
-    }
 
-    if (digits) {
-      const parsed = Number(digits);
-      if (Number.isFinite(parsed)) {
-        return parsed;
+      let index = markerIndex + marker.length;
+      while (index < value.length && skippable.has(value[index] ?? "")) {
+        index += 1;
       }
+
+      let digits = "";
+      while (index < value.length) {
+        const character = value[index];
+        if (!character) {
+          break;
+        }
+
+        const code = character.charCodeAt(0);
+        if (code < 48 || code > 57) {
+          break;
+        }
+
+        digits += character;
+        index += 1;
+      }
+
+      if (digits) {
+        const parsed = Number(digits);
+        if (Number.isFinite(parsed)) {
+          return {
+            code: parsed,
+            source,
+            confidence: 0.55,
+            rawMatch: value.slice(markerIndex, Math.min(value.length, index + 1)).trim(),
+          };
+        }
+      }
+
+      searchIndex = markerIndex + marker.length;
     }
   }
 
@@ -396,47 +1158,105 @@ function extractEvents(source: Record<string, unknown> | undefined): BidEvent[] 
   });
 }
 
-function deriveOutcome(
-  bidAmount: number | null,
-  winningBid: number | null,
-  isZeroBid: boolean,
-  reasonForReject: string | null,
-  httpStatusCode: number | null,
-): InvestigationOutcome {
-  if (isZeroBid) {
-    return "zero_bid";
+function resolveStructuredErrorMessage(
+  responseRecord: Record<string, unknown> | undefined,
+) {
+  if (!responseRecord) {
+    return null;
   }
 
-  if (reasonForReject || (httpStatusCode !== null && httpStatusCode >= 400)) {
-    return "rejected";
+  const directMessage = toStringValue(
+    pickFirstValue(responseRecord, [
+      "error.message",
+      "message",
+      "errorMessage",
+      "status",
+      "description",
+      "reason",
+    ]),
+  );
+
+  if (directMessage) {
+    return directMessage;
   }
 
-  if ((winningBid ?? 0) > 0 || (bidAmount ?? 0) > 0) {
-    return "accepted";
+  const errorArrays = [
+    readArrayPath(responseRecord, "errors"),
+    readArrayPath(responseRecord, "error.errors"),
+  ];
+
+  for (const entries of errorArrays) {
+    if (!entries) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (typeof entry === "string" && entry.trim()) {
+        return entry.trim();
+      }
+
+      if (!isRecord(entry)) {
+        continue;
+      }
+
+      const message = toStringValue(
+        pickFirstValue(entry, ["message", "description", "error", "reason", "status"]),
+      );
+      if (message) {
+        return message;
+      }
+    }
   }
 
-  return "unknown";
+  const objectErrors = pickFirstValue(responseRecord, ["errors", "error.errors"]);
+  if (isRecord(objectErrors)) {
+    const joined = joinStructuredText(objectErrors);
+    if (joined) {
+      return joined;
+    }
+  }
+
+  return null;
 }
 
 function extractAttemptErrorDetails(input: {
-  responseBody: Record<string, unknown> | string | null;
+  structuredSources: Array<{ label: string; value: Record<string, unknown> | undefined }>;
   rejectReason: string | null;
   errorMessage: string | null;
-}) {
-  const responseRecord = isRecord(input.responseBody) ? input.responseBody : undefined;
+}): ErrorDetails {
+  const responseRecord = input.structuredSources[0]?.value;
   const errors = toStringArray(pickFirstValue(responseRecord, ["errors", "error.errors"]));
-  const nestedErrorCode = toNumberValue(
-    pickFirstValue(responseRecord, ["error.code", "code", "statusCode"]),
-  );
-  const nestedErrorMessage = toStringValue(
-    pickFirstValue(responseRecord, ["error.message", "message", "status"]),
-  );
-  const errorCode =
-    nestedErrorCode ??
-    extractErrorCodeFromText(input.rejectReason) ??
-    extractErrorCodeFromText(input.errorMessage) ??
-    errors.map((value) => extractErrorCodeFromText(value)).find((value) => value !== null) ??
-    null;
+  const candidates: ErrorCodeCandidate[] = [];
+
+  for (const source of input.structuredSources) {
+    candidates.push(...collectStructuredErrorCandidates(source.value, source.label));
+  }
+
+  const textSources = [
+    {
+      value: input.rejectReason,
+      source: "rejectReason_text",
+    },
+    {
+      value: input.errorMessage,
+      source: "errorMessage_text",
+    },
+    ...errors.map((value, index) => ({
+      value,
+      source: `errors[${index}]_text`,
+    })),
+  ];
+
+  for (const source of textSources) {
+    const candidate = findCodeInText(source.value, source.source);
+    if (candidate) {
+      candidates.push(candidate);
+      break;
+    }
+  }
+
+  const bestCandidate = candidates[0] ?? null;
+  const nestedErrorMessage = resolveStructuredErrorMessage(responseRecord);
   const errorMessage =
     input.errorMessage ??
     nestedErrorMessage ??
@@ -445,15 +1265,20 @@ function extractAttemptErrorDetails(input: {
     null;
 
   return {
-    errorCode,
+    errorCode: bestCandidate?.code ?? null,
     errorMessage,
     errors,
+    errorCodeSource: bestCandidate?.source ?? null,
+    errorCodeConfidence: bestCandidate?.confidence ?? null,
+    errorCodeRawMatch: bestCandidate?.rawMatch ?? null,
+    usedTextFallback: (bestCandidate?.source ?? "").includes("_text"),
   };
 }
 
 function parseTargetAttempts(
   record: Record<string, unknown> | undefined,
-): BidTargetAttempt[] {
+  warnings: NormalizationWarning[],
+): ParsedTargetAttempt[] {
   if (!record) {
     return [];
   }
@@ -463,7 +1288,7 @@ function parseTargetAttempts(
     return [];
   }
 
-  const attempts: BidTargetAttempt[] = [];
+  const attempts: ParsedTargetAttempt[] = [];
   const acceptedTargets = new Map<string, { bidAmount: number | null; minDurationSeconds: number | null }>();
   const winningTargets = new Set<string>();
   const rejectedTargets = new Map<string, { reason: string | null; bidAmount: number | null; minDurationSeconds: number | null }>();
@@ -532,8 +1357,20 @@ function parseTargetAttempts(
         toStringValue(value) ?? "",
       ]),
     );
-    const responseBody = toObjectOrString(parseStructuredBody(eventStrVals.responseBody ?? null));
-    const requestBody = toObjectOrString(parseStructuredBody(eventStrVals.requestBody ?? null));
+    const responseBody = toObjectOrString(
+      parseStructuredValue(
+        eventStrVals.responseBody ?? null,
+        `targetAttempts[${attempts.length}].responseBody`,
+        warnings,
+      ),
+    );
+    const requestBody = toObjectOrString(
+      parseStructuredValue(
+        eventStrVals.requestBody ?? null,
+        `targetAttempts[${attempts.length}].requestBody`,
+        warnings,
+      ),
+    );
     const rejectReason =
       toStringValue(pickFirstValue(isRecord(responseBody) ? responseBody : undefined, ["rejectReason"])) ??
       null;
@@ -563,7 +1400,12 @@ function parseTargetAttempts(
       rejectedSummary?.minDurationSeconds ??
       null;
     const parsedErrors = extractAttemptErrorDetails({
-      responseBody,
+      structuredSources: [
+        {
+          label: `targetAttempts[${attempts.length}].responseBody`,
+          value: isRecord(responseBody) ? responseBody : undefined,
+        },
+      ],
       rejectReason,
       errorMessage,
     });
@@ -597,6 +1439,10 @@ function parseTargetAttempts(
       errorCode: parsedErrors.errorCode,
       errorMessage: parsedErrors.errorMessage,
       errors: parsedErrors.errors,
+      errorCodeSource: parsedErrors.errorCodeSource,
+      errorCodeConfidence: parsedErrors.errorCodeConfidence,
+      errorCodeRawMatch: parsedErrors.errorCodeRawMatch,
+      usedTextFallback: parsedErrors.usedTextFallback,
       requestBody,
       responseBody,
       summaryReason: rejectedSummary?.reason ?? null,
@@ -607,8 +1453,132 @@ function parseTargetAttempts(
   return attempts;
 }
 
+function classifyBidDisposition(input: {
+  bidAmount: number | null;
+  winningBid: number | null;
+  isZeroBid: boolean;
+  reasonForReject: string | null;
+  httpStatusCode: number | null;
+  primaryAttempt: ParsedTargetAttempt | null;
+  normalizedResponseBody: Record<string, unknown> | string | null;
+  primaryErrorCode: number | null;
+  primaryErrorMessage: string | null;
+  primaryErrorSource: string | null;
+}) {
+  if (
+    (input.winningBid ?? 0) > 0 ||
+    (input.bidAmount ?? 0) > 0 ||
+    input.primaryAttempt?.winning === true ||
+    (input.primaryAttempt?.accepted === true && (input.primaryAttempt.bidAmount ?? 0) > 0)
+  ) {
+    return buildDisposition({
+      outcomeReasonCategory: "accepted",
+      outcomeReasonCode: null,
+      outcomeReasonMessage: null,
+      classificationSource: "heuristic",
+      classificationConfidence: 0.99,
+    });
+  }
+
+  const primaryAttemptResponse =
+    isRecord(input.primaryAttempt?.responseBody) ? input.primaryAttempt.responseBody : undefined;
+  const primaryAttemptFallbackCode =
+    input.primaryAttempt && input.primaryAttempt.errorCode !== null
+      ? String(input.primaryAttempt.errorCode)
+      : null;
+  const primaryAttemptClassification = classifyStructuredResponse({
+    responseRecord: primaryAttemptResponse,
+    reasonForReject: input.reasonForReject,
+    defaultSource: "primary_attempt_structured",
+    defaultConfidence: 0.98,
+    fallbackCode: primaryAttemptFallbackCode,
+    fallbackMessage: input.primaryAttempt?.errorMessage ?? null,
+  });
+  if (primaryAttemptClassification) {
+    return primaryAttemptClassification;
+  }
+
+  const topLevelResponse =
+    isRecord(input.normalizedResponseBody) ? input.normalizedResponseBody : undefined;
+  const topLevelClassification = classifyStructuredResponse({
+    responseRecord: topLevelResponse,
+    reasonForReject: input.reasonForReject,
+    defaultSource: "response_body_structured",
+    defaultConfidence: 0.94,
+    fallbackCode: input.primaryErrorCode !== null ? String(input.primaryErrorCode) : null,
+    fallbackMessage: input.primaryErrorMessage,
+  });
+  if (topLevelClassification) {
+    return topLevelClassification;
+  }
+
+  const codeClassification = classifyFromPrimaryErrorCode({
+    code: input.primaryErrorCode,
+    message: input.primaryErrorMessage,
+    source: input.primaryErrorSource,
+  });
+  if (codeClassification) {
+    return codeClassification;
+  }
+
+  const reasonClassification = classifyFromReasonForReject(input.reasonForReject);
+  if (reasonClassification) {
+    return reasonClassification;
+  }
+
+  if (input.httpStatusCode === 429) {
+    return buildDisposition({
+      outcomeReasonCategory: "rate_limited",
+      outcomeReasonCode: "429",
+      outcomeReasonMessage: input.primaryErrorMessage ?? input.reasonForReject,
+      classificationSource: "top_level_error",
+      classificationConfidence: 0.88,
+    });
+  }
+
+  if (input.httpStatusCode === 422) {
+    return buildDisposition({
+      outcomeReasonCategory: "request_invalid",
+      outcomeReasonCode: "422",
+      outcomeReasonMessage: input.primaryErrorMessage ?? input.reasonForReject,
+      classificationSource: "top_level_error",
+      classificationConfidence: 0.82,
+    });
+  }
+
+  if (input.isZeroBid) {
+    return buildDisposition({
+      outcomeReasonCategory: "unknown_no_payable_bid",
+      outcomeReasonCode: null,
+      outcomeReasonMessage: input.primaryErrorMessage ?? input.reasonForReject,
+      classificationSource: "is_zero_bid_flag",
+      classificationConfidence: 0.46,
+    });
+  }
+
+  if (input.reasonForReject || input.primaryErrorMessage) {
+    return buildDisposition({
+      outcomeReasonCategory: "unknown_no_payable_bid",
+      outcomeReasonCode: extractReasonCodeFromText(input.reasonForReject),
+      outcomeReasonMessage: input.primaryErrorMessage ?? input.reasonForReject,
+      classificationSource: "heuristic",
+      classificationConfidence: 0.35,
+    });
+  }
+
+  return {
+    outcome: "unknown",
+    outcomeReasonCategory: null,
+    outcomeReasonCode: null,
+    outcomeReasonMessage: null,
+    classificationSource: null,
+    classificationConfidence: null,
+    classificationWarnings: [],
+  } satisfies BidDisposition;
+}
+
 function pickPrimaryAttempt(
-  targetAttempts: BidTargetAttempt[],
+  targetAttempts: ParsedTargetAttempt[],
   outcome: InvestigationOutcome,
 ) {
   if (targetAttempts.length === 0) {
@@ -687,19 +1657,231 @@ function deriveFailureStage(
   return "unknown";
 }
 
-export function normalizeRingbaBidDetail(
+function deriveSchemaVariant(
+  body: Record<string, unknown> | undefined,
+  record: Record<string, unknown> | undefined,
+) {
+  const reportRecords = readArrayPath(body, "report.records");
+
+  if (reportRecords && record) {
+    return "report_records";
+  }
+
+  if (body && record === body) {
+    return "top_level_record";
+  }
+
+  if (body) {
+    return "parsed_body";
+  }
+
+  return "unknown";
+}
+
+function parseFetchBody(
+  fetchResult: RingbaFetchResult,
+  warnings: NormalizationWarning[],
+) {
+  if (isRecord(fetchResult.rawBody)) {
+    return fetchResult.rawBody;
+  }
+
+  if (typeof fetchResult.rawBody !== "string" || !fetchResult.rawBody.trim()) {
+    return undefined;
+  }
+
+  const parsed = parseStructuredValue(fetchResult.rawBody, "fetchResult.rawBody", warnings);
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function extractEventsAndUnknownNames(
+  source: Record<string, unknown> | undefined,
+) {
+  const relevantEvents = extractEvents(source);
+  const unknownEventNames = Array.from(
+    new Set(
+      relevantEvents
+        .map((event) => event.eventName)
+        .filter((eventName) => !KNOWN_EVENT_NAMES.has(eventName) && !eventName.startsWith("event_")),
+    ),
+  );
+
+  return {
+    relevantEvents,
+    unknownEventNames,
+  };
+}
+
+function parseRawRingbaBidDetail(fetchResult: RingbaFetchResult): ParsedRingbaBidDetail {
+  const warnings: NormalizationWarning[] = [];
+  const body = parseFetchBody(fetchResult, warnings);
+  const record = getPrimaryRecord(body);
+
+  if (readPath(body, "report.partialResult") === true) {
+    addWarning(warnings, {
+      code: "partial_report",
+      message: "Ringba marked this payload as partial.",
+      field: "report.partialResult",
+    });
+  }
+
+  if (!record) {
+    addWarning(warnings, {
+      code: "shape_unknown",
+      message: "Could not locate a primary Ringba record in the payload.",
+      field: "rawBody",
+    });
+  }
+
+  const { relevantEvents, unknownEventNames } = extractEventsAndUnknownNames(record ?? body);
+  if (unknownEventNames.length > 0) {
+    addWarning(warnings, {
+      code: "unknown_event_names",
+      message: `Found ${unknownEventNames.length} unknown Ringba event name(s).`,
+      field: "events",
+    });
+  }
+
+  return {
+    body,
+    record,
+    sources: [
+      {
+        label: "record",
+        value: record,
+      },
+      {
+        label: "body",
+        value: body,
+      },
+    ],
+    relevantEvents,
+    targetAttempts: parseTargetAttempts(record, warnings),
+    traceJson: parseTraceValue(readPath(record, "trace"), "record.trace", warnings),
+    schemaVariant: deriveSchemaVariant(body, record),
+    warnings,
+    unknownEventNames,
+  };
+}
+
+function roundConfidence(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function computeNormalizationConfidence(input: {
+  parseStatus: NormalizationParseStatus;
+  missingCriticalFields: string[];
+  missingOptionalFields: string[];
+  warnings: NormalizationWarning[];
+}) {
+  let confidence = 0.99;
+
+  for (const warning of input.warnings) {
+    switch (warning.code) {
+      case "json_parse_failed":
+        confidence -= 0.16;
+        break;
+      case "trace_parse_failed":
+        confidence -= 0.1;
+        break;
+      case "partial_report":
+        confidence -= 0.15;
+        break;
+      case "shape_unknown":
+        confidence -= 0.28;
+        break;
+      case "missing_critical_field":
+        confidence -= 0.14;
+        break;
+      case "missing_optional_field":
+        confidence -= 0.03;
+        break;
+      case "unknown_event_names":
+        confidence -= 0.06;
+        break;
+      case "primary_error_code_text_fallback":
+        confidence -= 0.12;
+        break;
+      case "bid_id_from_fetch_context":
+        confidence -= 0.08;
+        break;
+      default:
+        confidence -= 0.03;
+        break;
+    }
+  }
+
+  confidence -= Math.max(0, input.missingCriticalFields.length - 1) * 0.04;
+  confidence -= Math.max(0, input.missingOptionalFields.length - 2) * 0.01;
+
+  if (input.parseStatus === "partial") {
+    confidence = Math.min(confidence, 0.48);
+  }
+
+  if (input.parseStatus === "text_fallback") {
+    confidence = Math.min(confidence, 0.58);
+  }
+
+  if (input.parseStatus === "shape_unknown") {
+    confidence = Math.min(confidence, 0.24);
+  }
+
+  return roundConfidence(Math.max(0.05, Math.min(1, confidence)));
+}
+
+function toPersistedTargetAttempt(attempt: ParsedTargetAttempt): BidTargetAttempt {
+  const {
+    errorCodeSource: _errorCodeSource,
+    errorCodeConfidence: _errorCodeConfidence,
+    errorCodeRawMatch: _errorCodeRawMatch,
+    usedTextFallback: _usedTextFallback,
+    ...normalizedAttempt
+  } = attempt;
+  return normalizedAttempt;
+}
+
+function normalizeParsedRingbaBid(
+  parsed: ParsedRingbaBidDetail,
   fetchResult: RingbaFetchResult,
 ): NormalizedBidData {
-  const body = isRecord(fetchResult.rawBody) ? fetchResult.rawBody : undefined;
-  const record = getPrimaryRecord(body);
-  const sources = [record, body];
-  const targetAttempts = parseTargetAttempts(record);
+  const warnings = [...parsed.warnings];
+  const rawPathsUsed: Record<string, string[]> = {};
+  const sources = parsed.sources;
 
   const bidId =
-    toStringValue(pickFirstValueFromSources(sources, ["bidId", "id", "bid.id"])) ??
+    toStringValue(getValueFromSources(sources, rawPathsUsed, "bidId", ["bidId", "id", "bid.id"])) ??
     fetchResult.bidId;
+  if (!(rawPathsUsed.bidId?.length)) {
+    addWarning(warnings, {
+      code: "bid_id_from_fetch_context",
+      message: "Recovered bid ID from fetch context instead of payload.",
+      field: "bidId",
+    });
+  }
+
+  const bidDt = toIsoDateTime(
+    getValueFromSources(sources, rawPathsUsed, "bidDt", [
+      "bidDt",
+      "bidDateTime",
+      "timestamp",
+      "createdAt",
+      "bid.timestamp",
+    ]),
+  );
+  const campaignName = toStringValue(
+    getValueFromSources(sources, rawPathsUsed, "campaignName", ["campaignName", "campaign.name"]),
+  );
+  const campaignId = toStringValue(
+    getValueFromSources(sources, rawPathsUsed, "campaignId", ["campaignId", "campaign.id"]),
+  );
+  const publisherName = toStringValue(
+    getValueFromSources(sources, rawPathsUsed, "publisherName", ["publisherName", "publisher.name"]),
+  );
+  const publisherId = toStringValue(
+    getValueFromSources(sources, rawPathsUsed, "publisherId", ["publisherId", "publisher.id"]),
+  );
   const bidAmount = toNumberValue(
-    pickFirstValueFromSources(sources, [
+    getValueFromSources(sources, rawPathsUsed, "bidAmount", [
       "bidAmount",
       "amount",
       "bid.amount",
@@ -707,7 +1889,7 @@ export function normalizeRingbaBidDetail(
     ]),
   );
   const winningBid = toNumberValue(
-    pickFirstValueFromSources(sources, [
+    getValueFromSources(sources, rawPathsUsed, "winningBid", [
       "winningBid",
       "winningBidAmount",
       "acceptedBid",
@@ -715,7 +1897,7 @@ export function normalizeRingbaBidDetail(
     ]),
   );
   const reasonForReject = toStringValue(
-    pickFirstValueFromSources(sources, [
+    getValueFromSources(sources, rawPathsUsed, "reasonForReject", [
       "reasonForReject",
       "rejectReason",
       "rejection.reason",
@@ -724,11 +1906,15 @@ export function normalizeRingbaBidDetail(
   );
   const httpStatusCode =
     toNumberValue(
-      pickFirstValueFromSources(sources, ["httpStatusCode", "response.statusCode", "statusCode"]),
+      getValueFromSources(sources, rawPathsUsed, "httpStatusCode", [
+        "httpStatusCode",
+        "response.statusCode",
+        "statusCode",
+      ]),
     ) ?? fetchResult.httpStatusCode;
-  const errorMessage =
+  const topLevelErrorMessage =
     toStringValue(
-      pickFirstValueFromSources(sources, [
+      getValueFromSources(sources, rawPathsUsed, "errorMessage", [
         "errorMessage",
         "error.message",
         "message",
@@ -737,110 +1923,228 @@ export function normalizeRingbaBidDetail(
     ) ?? fetchResult.transportError;
   const requestBody =
     toObjectOrString(
-      pickFirstValueFromSources(sources, [
+      parseStructuredValue(
+        getValueFromSources(sources, rawPathsUsed, "requestBody", [
+          "requestBody",
+          "request.body",
+          "requestPayload",
+          "payload",
+        ]),
         "requestBody",
-        "request.body",
-        "requestPayload",
-        "payload",
-      ]),
+        warnings,
+      ),
     ) ?? null;
   const responseBody =
     toObjectOrString(
-      pickFirstValueFromSources(sources, ["responseBody", "response.body", "buyerResponse", "body"]),
+      parseStructuredValue(
+        getValueFromSources(sources, rawPathsUsed, "responseBody", [
+          "responseBody",
+          "response.body",
+          "buyerResponse",
+          "body",
+        ]),
+        "responseBody",
+        warnings,
+      ),
     ) ??
-    (record
-      ? record
+    (parsed.record
+      ? parsed.record
       : typeof fetchResult.rawBody === "string" || isRecord(fetchResult.rawBody)
         ? fetchResult.rawBody
         : null);
   const bidElapsedMs = toNumberValue(
-    pickFirstValueFromSources(sources, ["bidElapsedMs", "elapsedMs", "trace.bidElapsedMs"]),
+    getValueFromSources(sources, rawPathsUsed, "bidElapsedMs", [
+      "bidElapsedMs",
+      "elapsedMs",
+      "trace.bidElapsedMs",
+    ]),
   );
-  const primaryAttemptResponse = pickPrimaryAttempt(
-    targetAttempts,
-    deriveOutcome(
-      bidAmount,
-      winningBid,
-      bidAmount === 0 || winningBid === 0 || String(reasonForReject ?? "").toLowerCase().includes("zero bid"),
-      reasonForReject,
-      httpStatusCode,
-    ),
+  const explicitIsZeroBid = toBooleanValue(
+    getValueFromSources(sources, rawPathsUsed, "isZeroBid", ["isZeroBid"]),
   );
-  const normalizedRequestBody = primaryAttemptResponse?.requestBody ?? requestBody;
-  const normalizedResponseBody = primaryAttemptResponse?.responseBody ?? responseBody;
-  const relevantEvents = extractEvents(record ?? body);
 
   const isZeroBid =
+    explicitIsZeroBid === true ||
     bidAmount === 0 ||
     winningBid === 0 ||
     String(reasonForReject ?? "").toLowerCase().includes("zero bid") ||
-    relevantEvents.some((event) => event.eventName === "ZeroRTBBid") ||
-    (targetAttempts.length > 0 &&
-      targetAttempts.every((attempt) => {
+    parsed.relevantEvents.some((event) => event.eventName === "ZeroRTBBid") ||
+    (parsed.targetAttempts.length > 0 &&
+      parsed.targetAttempts.every((attempt) => {
         const hasExplicitBid = attempt.bidAmount !== null;
         return attempt.accepted !== true && (!hasExplicitBid || attempt.bidAmount === 0);
       }));
+  const provisionalOutcome: InvestigationOutcome =
+    (winningBid ?? 0) > 0 || (bidAmount ?? 0) > 0 ? "accepted" : "unknown";
+  const primaryAttempt = pickPrimaryAttempt(parsed.targetAttempts, provisionalOutcome);
 
-  const outcome = deriveOutcome(
+  const normalizedRequestBody = primaryAttempt?.requestBody ?? requestBody;
+  const normalizedResponseBody = primaryAttempt?.responseBody ?? responseBody;
+  if (primaryAttempt?.requestBody) {
+    pushPathUsage(rawPathsUsed, "requestBody", "targetAttempts.primary.requestBody");
+  }
+  if (primaryAttempt?.responseBody) {
+    pushPathUsage(rawPathsUsed, "responseBody", "targetAttempts.primary.responseBody");
+  }
+
+  const primaryErrorDetails =
+    primaryAttempt && primaryAttempt.errorCode !== null
+      ? {
+          code: primaryAttempt.errorCode,
+          source: primaryAttempt.errorCodeSource,
+          confidence: primaryAttempt.errorCodeConfidence,
+          rawMatch: primaryAttempt.errorCodeRawMatch,
+          message: primaryAttempt.errorMessage,
+          usedTextFallback: primaryAttempt.usedTextFallback,
+        }
+      : (() => {
+          const details = extractAttemptErrorDetails({
+            structuredSources: [
+              {
+                label: "responseBody",
+                value: isRecord(normalizedResponseBody) ? normalizedResponseBody : undefined,
+              },
+              {
+                label: "record",
+                value: parsed.record,
+              },
+              {
+                label: "body",
+                value: parsed.body,
+              },
+            ],
+            rejectReason: reasonForReject,
+            errorMessage: topLevelErrorMessage,
+          });
+
+          return {
+            code: details.errorCode,
+            source: details.errorCodeSource,
+            confidence: details.errorCodeConfidence,
+            rawMatch: details.errorCodeRawMatch,
+            message: details.errorMessage,
+            usedTextFallback: details.usedTextFallback,
+          };
+        })();
+
+  const disposition = classifyBidDisposition({
     bidAmount,
     winningBid,
     isZeroBid,
     reasonForReject,
     httpStatusCode,
-  );
-  const primaryAttempt = pickPrimaryAttempt(targetAttempts, outcome);
-  const traceJson = parseTraceValue(readPath(record, "trace"));
+    primaryAttempt,
+    normalizedResponseBody,
+    primaryErrorCode: primaryErrorDetails.code,
+    primaryErrorMessage: primaryErrorDetails.message,
+    primaryErrorSource: primaryErrorDetails.source,
+  });
+  const outcome = disposition.outcome;
+
+  if (primaryAttempt?.targetName) {
+    pushPathUsage(rawPathsUsed, "targetName", `targetAttempts.primary.${primaryAttempt.targetName}`);
+    pushPathUsage(rawPathsUsed, "primaryTargetName", `targetAttempts.primary.${primaryAttempt.targetName}`);
+  }
+  if (primaryAttempt?.targetId) {
+    pushPathUsage(rawPathsUsed, "targetId", "targetAttempts.primary.targetId");
+    pushPathUsage(rawPathsUsed, "primaryTargetId", "targetAttempts.primary.targetId");
+  }
+  if (primaryAttempt?.targetBuyer) {
+    pushPathUsage(rawPathsUsed, "buyerName", "targetAttempts.primary.targetBuyer");
+    pushPathUsage(rawPathsUsed, "primaryBuyerName", "targetAttempts.primary.targetBuyer");
+  }
+  if (primaryAttempt?.targetBuyerId) {
+    pushPathUsage(rawPathsUsed, "buyerId", "targetAttempts.primary.targetBuyerId");
+    pushPathUsage(rawPathsUsed, "primaryBuyerId", "targetAttempts.primary.targetBuyerId");
+  }
+
+  if (primaryErrorDetails.usedTextFallback) {
+    addWarning(warnings, {
+      code: "primary_error_code_text_fallback",
+      message: "Derived primary error code from text fallback instead of a structured field.",
+      field: "primaryErrorCode",
+    });
+  }
+  if (primaryErrorDetails.source) {
+    pushPathUsage(rawPathsUsed, "primaryErrorCode", primaryErrorDetails.source);
+  }
+
+  const primaryFailureStage = deriveFailureStage(outcome, primaryAttempt);
+  const missingCriticalFields = [
+    ...(bidDt ? [] : ["bidDt"]),
+    ...(parsed.targetAttempts.length > 0 ? [] : ["targetAttempts"]),
+    ...(outcome === "unknown" ? ["outcome"] : []),
+    ...(primaryFailureStage === "unknown" ? ["primaryFailureStage"] : []),
+  ];
+  const missingOptionalFields = [
+    ...(campaignId ? [] : ["campaignId"]),
+    ...(publisherId ? [] : ["publisherId"]),
+    ...((primaryAttempt?.targetBuyerId ?? null) ? [] : ["buyerId"]),
+    ...(normalizedRequestBody ? [] : ["requestBody"]),
+    ...(normalizedResponseBody ? [] : ["responseBody"]),
+    ...(reasonForReject ? [] : ["reasonForReject"]),
+  ];
+
+  for (const field of missingCriticalFields) {
+    addWarning(warnings, {
+      code: "missing_critical_field",
+      message: `Missing critical field: ${field}.`,
+      field,
+    });
+  }
+  for (const field of missingOptionalFields) {
+    addWarning(warnings, {
+      code: "missing_optional_field",
+      message: `Missing optional field: ${field}.`,
+      field,
+    });
+  }
+
+  const parseStatus: NormalizationParseStatus =
+    parsed.schemaVariant === "unknown"
+      ? "shape_unknown"
+      : missingCriticalFields.length > 0 || warnings.some((warning) => warning.code === "partial_report")
+        ? "partial"
+        : primaryErrorDetails.usedTextFallback
+          ? "text_fallback"
+          : "complete";
 
   return {
     bidId,
-    bidDt:
-      toIsoDateTime(
-        pickFirstValueFromSources(sources, [
-          "bidDt",
-          "bidDateTime",
-          "timestamp",
-          "createdAt",
-          "bid.timestamp",
-        ]),
-      ),
-    campaignName: toStringValue(
-      pickFirstValueFromSources(sources, ["campaignName", "campaign.name"]),
-    ),
-    campaignId: toStringValue(
-      pickFirstValueFromSources(sources, ["campaignId", "campaign.id"]),
-    ),
-    publisherName: toStringValue(
-      pickFirstValueFromSources(sources, ["publisherName", "publisher.name"]),
-    ),
-    publisherId: toStringValue(
-      pickFirstValueFromSources(sources, ["publisherId", "publisher.id"]),
-    ),
+    bidDt,
+    campaignName,
+    campaignId,
+    publisherName,
+    publisherId,
     targetName:
       primaryAttempt?.targetName ??
-      toStringValue(pickFirstValueFromSources(sources, ["targetName", "target.name"])),
+      toStringValue(getValueFromSources(sources, rawPathsUsed, "targetName", ["targetName", "target.name"])),
     targetId:
       primaryAttempt?.targetId ??
-      toStringValue(pickFirstValueFromSources(sources, ["targetId", "target.id"])),
+      toStringValue(getValueFromSources(sources, rawPathsUsed, "targetId", ["targetId", "target.id"])),
     buyerName:
       primaryAttempt?.targetBuyer ??
-      toStringValue(pickFirstValueFromSources(sources, ["buyerName", "buyer.name"])),
+      toStringValue(getValueFromSources(sources, rawPathsUsed, "buyerName", ["buyerName", "buyer.name"])),
     buyerId:
       primaryAttempt?.targetBuyerId ??
-      toStringValue(pickFirstValueFromSources(sources, ["buyerId", "buyer.id"])),
+      toStringValue(getValueFromSources(sources, rawPathsUsed, "buyerId", ["buyerId", "buyer.id"])),
     bidAmount,
     winningBid,
     bidElapsedMs,
     isZeroBid,
     reasonForReject,
     httpStatusCode,
-    errorMessage: primaryAttempt?.errorMessage ?? errorMessage,
-    primaryFailureStage: deriveFailureStage(outcome, primaryAttempt),
+    errorMessage: primaryAttempt?.errorMessage ?? topLevelErrorMessage,
+    primaryFailureStage,
     primaryTargetName: primaryAttempt?.targetName ?? null,
     primaryTargetId: primaryAttempt?.targetId ?? null,
     primaryBuyerName: primaryAttempt?.targetBuyer ?? null,
     primaryBuyerId: primaryAttempt?.targetBuyerId ?? null,
-    primaryErrorCode: primaryAttempt?.errorCode ?? extractErrorCodeFromText(errorMessage),
-    primaryErrorMessage: primaryAttempt?.errorMessage ?? errorMessage,
+    primaryErrorCode: primaryErrorDetails.code,
+    primaryErrorMessage:
+      primaryAttempt?.errorMessage ??
+      primaryErrorDetails.message ??
+      topLevelErrorMessage,
     requestBody: normalizedRequestBody,
     responseBody: normalizedResponseBody,
     rawTraceJson: {
@@ -852,15 +2156,44 @@ export function normalizeRingbaBidDetail(
       attemptCount: fetchResult.attemptCount,
       responseHeaders: fetchResult.responseHeaders,
       transportError: fetchResult.transportError,
-      trace: traceJson,
+      trace: parsed.traceJson,
       payload: isRecord(fetchResult.rawBody)
         ? fetchResult.rawBody
         : {
             raw: fetchResult.rawBody,
           },
     },
-    relevantEvents,
-    targetAttempts,
+    relevantEvents: parsed.relevantEvents,
+    targetAttempts: parsed.targetAttempts.map(toPersistedTargetAttempt),
     outcome,
+    outcomeReasonCategory: disposition.outcomeReasonCategory,
+    outcomeReasonCode: disposition.outcomeReasonCode,
+    outcomeReasonMessage: disposition.outcomeReasonMessage,
+    classificationSource: disposition.classificationSource,
+    classificationConfidence: disposition.classificationConfidence,
+    classificationWarnings: disposition.classificationWarnings,
+    parseStatus,
+    normalizationVersion: NORMALIZATION_VERSION,
+    schemaVariant: parsed.schemaVariant,
+    normalizationConfidence: computeNormalizationConfidence({
+      parseStatus,
+      missingCriticalFields,
+      missingOptionalFields,
+      warnings,
+    }),
+    normalizationWarnings: warnings,
+    missingCriticalFields,
+    missingOptionalFields,
+    unknownEventNames: parsed.unknownEventNames,
+    rawPathsUsed,
+    primaryErrorCodeSource: primaryErrorDetails.source,
+    primaryErrorCodeConfidence: primaryErrorDetails.confidence,
+    primaryErrorCodeRawMatch: primaryErrorDetails.rawMatch,
   };
+}
+
+export function normalizeRingbaBidDetail(
+  fetchResult: RingbaFetchResult,
+): NormalizedBidData {
+  return normalizeParsedRingbaBid(parseRawRingbaBidDetail(fetchResult), fetchResult);
 }

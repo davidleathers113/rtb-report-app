@@ -46,6 +46,22 @@ function fetchStatusVariant(fetchStatus: InvestigationDetail["fetchStatus"]) {
   return "warning";
 }
 
+function parseStatusVariant(parseStatus: InvestigationDetail["parseStatus"]) {
+  if (parseStatus === "complete") {
+    return "success";
+  }
+
+  if (parseStatus === "text_fallback") {
+    return "warning";
+  }
+
+  if (parseStatus === "partial" || parseStatus === "shape_unknown") {
+    return "destructive";
+  }
+
+  return "default";
+}
+
 function failureStageVariant(stage: InvestigationDetail["primaryFailureStage"]) {
   if (stage === "accepted") {
     return "success";
@@ -57,6 +73,27 @@ function failureStageVariant(stage: InvestigationDetail["primaryFailureStage"]) 
 
   if (stage === "target_rejected" || stage === "fetch_failed") {
     return "destructive";
+  }
+
+  return "default";
+}
+
+function classificationVariant(category: InvestigationDetail["outcomeReasonCategory"]) {
+  if (category === "accepted") {
+    return "success";
+  }
+
+  if (
+    category === "missing_caller_id" ||
+    category === "missing_required_field" ||
+    category === "request_invalid" ||
+    category === "rate_limited"
+  ) {
+    return "destructive";
+  }
+
+  if (category) {
+    return "warning";
   }
 
   return "default";
@@ -79,15 +116,32 @@ export function BidDetailView({
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap gap-2">
+              <Badge variant={investigation.outcome === "accepted" ? "success" : "default"}>
+                {toSentenceCase(investigation.outcome)}
+              </Badge>
               <Badge variant={failureStageVariant(investigation.primaryFailureStage)}>
                 {toSentenceCase(investigation.primaryFailureStage)}
               </Badge>
+              {investigation.outcomeReasonCategory ? (
+                <Badge variant={classificationVariant(investigation.outcomeReasonCategory)}>
+                  {toSentenceCase(investigation.outcomeReasonCategory)}
+                </Badge>
+              ) : null}
               {investigation.primaryErrorCode !== null ? (
                 <Badge variant="destructive">Code {investigation.primaryErrorCode}</Badge>
               ) : null}
               <Badge variant={fetchStatusVariant(investigation.fetchStatus)}>
                 {toSentenceCase(investigation.fetchStatus)}
               </Badge>
+              <Badge variant={parseStatusVariant(investigation.parseStatus)}>
+                Parse {toSentenceCase(investigation.parseStatus)}
+              </Badge>
+              {investigation.normalizationWarnings.length > 0 ? (
+                <Badge variant="warning">
+                  {investigation.normalizationWarnings.length} parser warning
+                  {investigation.normalizationWarnings.length === 1 ? "" : "s"}
+                </Badge>
+              ) : null}
               <Badge variant={severityVariant(investigation.severity)}>
                 {toSentenceCase(investigation.severity)}
               </Badge>
@@ -115,7 +169,8 @@ export function BidDetailView({
             <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
               <p className="text-sm font-medium text-slate-900">Decisive Error</p>
               <p className="mt-2 text-sm leading-6 text-slate-700">
-                {investigation.primaryErrorMessage ??
+                {investigation.outcomeReasonMessage ??
+                  investigation.primaryErrorMessage ??
                   investigation.errorMessage ??
                   investigation.reasonForReject ??
                   "No decisive error message was extracted."}
@@ -207,6 +262,14 @@ export function BidDetailView({
                 </dd>
               </div>
               <div>
+                <dt className="text-sm text-slate-500">Outcome Reason</dt>
+                <dd className="font-medium text-slate-900">
+                  {investigation.outcomeReasonCategory
+                    ? toSentenceCase(investigation.outcomeReasonCategory)
+                    : "-"}
+                </dd>
+              </div>
+              <div>
                 <dt className="text-sm text-slate-500">Bid Amount</dt>
                 <dd className="font-medium text-slate-900">
                   {formatCurrency(investigation.bidAmount)}
@@ -258,6 +321,46 @@ export function BidDetailView({
               <p className="text-sm font-medium text-slate-900">Attempts</p>
               <p className="mt-1 text-sm leading-6 text-slate-600">
                 {investigation.fetchAttemptCount}.
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Classification Source</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.classificationSource ?? "-"}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Classification Confidence</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.classificationConfidence === null
+                  ? "-"
+                  : `${Math.round(investigation.classificationConfidence * 100)}%`}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Parse Status</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {toSentenceCase(investigation.parseStatus)}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Parser Confidence</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.normalizationConfidence === null
+                  ? "-"
+                  : `${Math.round(investigation.normalizationConfidence * 100)}%`}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Schema Variant</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.schemaVariant ?? "-"}
+              </p>
+            </div>
+            <div>
+              <p className="text-sm font-medium text-slate-900">Primary Error Source</p>
+              <p className="mt-1 text-sm leading-6 text-slate-600">
+                {investigation.primaryErrorCodeSource ?? "-"}
               </p>
             </div>
             {investigation.lastError ? (
@@ -403,6 +506,64 @@ export function BidDetailView({
               </li>
             ))}
           </ul>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Classification Warnings</CardTitle>
+          <CardDescription>
+            Conflicts or caveats captured while deriving the operator-facing classification.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {investigation.classificationWarnings.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+              No classification warnings were recorded for this investigation.
+            </div>
+          ) : (
+            <ul className="space-y-2 text-sm text-slate-600">
+              {investigation.classificationWarnings.map((warning, index) => (
+                <li
+                  key={`${warning.code}-${warning.field ?? "none"}-${index}`}
+                  className="rounded-lg bg-slate-50 p-3"
+                >
+                  <span className="font-medium text-slate-900">{warning.code}:</span>{" "}
+                  {warning.message}
+                  {warning.field ? ` (${warning.field})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Parser Warnings</CardTitle>
+          <CardDescription>
+            Drift and fallback signals captured during Ringba normalization.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {investigation.normalizationWarnings.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+              No parser warnings were recorded for this investigation.
+            </div>
+          ) : (
+            <ul className="space-y-2 text-sm text-slate-600">
+              {investigation.normalizationWarnings.map((warning, index) => (
+                <li
+                  key={`${warning.code}-${warning.field ?? "none"}-${index}`}
+                  className="rounded-lg bg-slate-50 p-3"
+                >
+                  <span className="font-medium text-slate-900">{warning.code}:</span>{" "}
+                  {warning.message}
+                  {warning.field ? ` (${warning.field})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
         </CardContent>
       </Card>
 

@@ -81,9 +81,19 @@ function toListItem(row: BidInvestigationRow): InvestigationListItem {
     severity: row.severity as InvestigationListItem["severity"],
     explanation: row.explanation,
     outcome: row.outcome as InvestigationListItem["outcome"],
+    outcomeReasonCategory: row.outcomeReasonCategory as InvestigationListItem["outcomeReasonCategory"],
+    outcomeReasonCode: row.outcomeReasonCode,
+    outcomeReasonMessage: row.outcomeReasonMessage,
+    classificationSource: row.classificationSource as InvestigationListItem["classificationSource"],
+    classificationConfidence: row.classificationConfidence,
     detailSource: row.detailSource as InvestigationListItem["detailSource"],
     enrichmentState: row.enrichmentState as InvestigationListItem["enrichmentState"],
     fetchStatus: row.fetchStatus as FetchStatus,
+    parseStatus: row.parseStatus as InvestigationListItem["parseStatus"],
+    schemaVariant: row.schemaVariant,
+    normalizationConfidence: row.normalizationConfidence,
+    normalizationWarningCount: ((row.normalizationWarningsJson ?? []) as unknown[]).length,
+    primaryErrorCodeSource: row.primaryErrorCodeSource,
     fetchedAt: row.fetchedAt,
     lastError: row.lastError,
     importedAt: row.importedAt,
@@ -175,6 +185,24 @@ function toDetail(
       rawEventJson: (attempt.rawEventJson ?? {}) as Record<string, unknown>,
     })),
     outcome: row.outcome as InvestigationDetail["outcome"],
+    outcomeReasonCategory: row.outcomeReasonCategory as InvestigationDetail["outcomeReasonCategory"],
+    outcomeReasonCode: row.outcomeReasonCode,
+    outcomeReasonMessage: row.outcomeReasonMessage,
+    classificationSource: row.classificationSource as InvestigationDetail["classificationSource"],
+    classificationConfidence: row.classificationConfidence,
+    classificationWarnings: (row.classificationWarningsJson ?? []) as InvestigationDetail["classificationWarnings"],
+    parseStatus: row.parseStatus as InvestigationDetail["parseStatus"],
+    normalizationVersion: row.normalizationVersion,
+    schemaVariant: row.schemaVariant,
+    normalizationConfidence: row.normalizationConfidence,
+    normalizationWarnings: (row.normalizationWarningsJson ?? []) as InvestigationDetail["normalizationWarnings"],
+    missingCriticalFields: (row.missingCriticalFieldsJson ?? []) as string[],
+    missingOptionalFields: (row.missingOptionalFieldsJson ?? []) as string[],
+    unknownEventNames: (row.unknownEventNamesJson ?? []) as string[],
+    rawPathsUsed: (row.rawPathsUsedJson ?? {}) as Record<string, string[]>,
+    primaryErrorCodeSource: row.primaryErrorCodeSource,
+    primaryErrorCodeConfidence: row.primaryErrorCodeConfidence,
+    primaryErrorCodeRawMatch: row.primaryErrorCodeRawMatch,
     rootCause: row.rootCause as InvestigationDetail["rootCause"],
     confidence: row.rootCauseConfidence,
     severity: row.severity as InvestigationDetail["severity"],
@@ -332,6 +360,8 @@ interface InvestigationPersistenceOptions {
   lastRingbaFetchAt?: string | null;
   ringbaFailureCount?: number;
   nextRingbaRetryAt?: string | null;
+  fetchedAt?: string | null;
+  preserveImportedAt?: boolean;
 }
 
 export async function upsertInvestigation(input: {
@@ -393,6 +423,24 @@ export async function upsertInvestigation(input: {
     responseBody: input.normalizedBid.responseBody,
     rawTraceJson: input.normalizedBid.rawTraceJson,
     outcome: input.normalizedBid.outcome,
+    outcomeReasonCategory: input.normalizedBid.outcomeReasonCategory,
+    outcomeReasonCode: input.normalizedBid.outcomeReasonCode,
+    outcomeReasonMessage: input.normalizedBid.outcomeReasonMessage,
+    classificationSource: input.normalizedBid.classificationSource,
+    classificationConfidence: input.normalizedBid.classificationConfidence,
+    classificationWarningsJson: input.normalizedBid.classificationWarnings,
+    parseStatus: input.normalizedBid.parseStatus,
+    normalizationVersion: input.normalizedBid.normalizationVersion,
+    schemaVariant: input.normalizedBid.schemaVariant,
+    normalizationConfidence: input.normalizedBid.normalizationConfidence,
+    normalizationWarningsJson: input.normalizedBid.normalizationWarnings,
+    missingCriticalFieldsJson: input.normalizedBid.missingCriticalFields,
+    missingOptionalFieldsJson: input.normalizedBid.missingOptionalFields,
+    unknownEventNamesJson: input.normalizedBid.unknownEventNames,
+    rawPathsUsedJson: input.normalizedBid.rawPathsUsed,
+    primaryErrorCodeSource: input.normalizedBid.primaryErrorCodeSource,
+    primaryErrorCodeConfidence: input.normalizedBid.primaryErrorCodeConfidence,
+    primaryErrorCodeRawMatch: input.normalizedBid.primaryErrorCodeRawMatch,
     rootCause: input.diagnosis.rootCause,
     rootCauseConfidence: input.diagnosis.confidence,
     severity: input.diagnosis.severity,
@@ -403,7 +451,10 @@ export async function upsertInvestigation(input: {
     detailSource,
     enrichmentState,
     fetchStatus: "fetched" as const,
-    fetchedAt: now,
+    fetchedAt:
+      input.persistence && "fetchedAt" in input.persistence
+        ? (input.persistence.fetchedAt ?? null)
+        : now,
     lastError: null,
     lastRingbaAttemptAt:
       input.persistence && "lastRingbaAttemptAt" in input.persistence
@@ -425,7 +476,7 @@ export async function upsertInvestigation(input: {
         ? (input.persistence.nextRingbaRetryAt ?? null)
         : null,
     leaseExpiresAt: null,
-    importedAt: now,
+    importedAt: input.persistence?.preserveImportedAt ? (existing?.importedAt ?? now) : now,
     updatedAt: now,
     createdAt: existing?.createdAt ?? now,
   };
@@ -533,10 +584,22 @@ export async function claimInvestigationFetch(input: {
         importRunId: input.importRunId,
         bidId: input.bidId,
         rawTraceJson: {},
+        classificationWarningsJson: [],
+        normalizationWarningsJson: [],
+        missingCriticalFieldsJson: [],
+        missingOptionalFieldsJson: [],
+        unknownEventNamesJson: [],
+        rawPathsUsedJson: {},
         evidenceJson: [],
         detailSource: "ringba_api",
         enrichmentState: "fetching",
         fetchStatus: "pending",
+        outcomeReasonCategory: null,
+        outcomeReasonCode: null,
+        outcomeReasonMessage: null,
+        classificationSource: null,
+        classificationConfidence: null,
+        parseStatus: "not_attempted",
         fetchStartedAt: now,
         lastRingbaAttemptAt: now,
         refreshRequestedAt: input.forceRefresh ? now : null,
@@ -688,10 +751,28 @@ export async function markInvestigationFetchFailed(input: {
   };
 
   if (!shouldPreserveExistingData) {
+    updatePayload.parseStatus = "not_attempted";
     updatePayload.httpStatusCode = input.httpStatusCode ?? null;
     updatePayload.responseBody = input.responseBody ?? null;
     updatePayload.rawTraceJson = input.rawTraceJson ?? {};
     updatePayload.outcome = "unknown";
+    updatePayload.outcomeReasonCategory = null;
+    updatePayload.outcomeReasonCode = null;
+    updatePayload.outcomeReasonMessage = null;
+    updatePayload.classificationSource = null;
+    updatePayload.classificationConfidence = null;
+    updatePayload.classificationWarningsJson = [];
+    updatePayload.normalizationVersion = null;
+    updatePayload.schemaVariant = null;
+    updatePayload.normalizationConfidence = null;
+    updatePayload.normalizationWarningsJson = [];
+    updatePayload.missingCriticalFieldsJson = [];
+    updatePayload.missingOptionalFieldsJson = [];
+    updatePayload.unknownEventNamesJson = [];
+    updatePayload.rawPathsUsedJson = {};
+    updatePayload.primaryErrorCodeSource = null;
+    updatePayload.primaryErrorCodeConfidence = null;
+    updatePayload.primaryErrorCodeRawMatch = null;
     updatePayload.rootCause = "unknown_needs_review";
     updatePayload.rootCauseConfidence = 0.2;
     updatePayload.severity = "high";
@@ -725,15 +806,33 @@ export async function markInvestigationFetchFailed(input: {
         importRunId: input.importRunId,
         detailSource: "ringba_api",
         enrichmentState: input.enrichmentState ?? "failed",
+        outcomeReasonCategory: null,
+        outcomeReasonCode: null,
+        outcomeReasonMessage: null,
+        classificationSource: null,
+        classificationConfidence: null,
+        classificationWarningsJson: [],
+        parseStatus: "not_attempted",
+        normalizationVersion: null,
+        schemaVariant: null,
+        normalizationConfidence: null,
         httpStatusCode: input.httpStatusCode ?? null,
         responseBody: input.responseBody ?? null,
         rawTraceJson: input.rawTraceJson ?? {},
+        normalizationWarningsJson: [],
+        missingCriticalFieldsJson: [],
+        missingOptionalFieldsJson: [],
+        unknownEventNamesJson: [],
+        rawPathsUsedJson: {},
         lastRingbaAttemptAt: now,
         ringbaFailureCount: 1,
         nextRingbaRetryAt:
           input.nextRingbaRetryAt === undefined ? null : (input.nextRingbaRetryAt ?? null),
         primaryFailureStage: "fetch_failed",
         primaryErrorMessage: input.errorMessage,
+        primaryErrorCodeSource: null,
+        primaryErrorCodeConfidence: null,
+        primaryErrorCodeRawMatch: null,
         outcome: "unknown",
         rootCause: "unknown_needs_review",
         rootCauseConfidence: 0.2,

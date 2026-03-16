@@ -9,6 +9,7 @@ import {
 import { diagnoseBid } from "@/lib/diagnostics/rules";
 import { fetchRingbaBidDetail, type RingbaFetchResult } from "@/lib/ringba/client";
 import { normalizeRingbaBidDetail } from "@/lib/ringba/normalize";
+import { isRecord } from "@/lib/utils/json";
 
 interface InvestigateBidOptions {
   importRunId: string | null;
@@ -204,6 +205,73 @@ export async function refreshInvestigation(bidId: string) {
   return investigateBid(bidId, {
     importRunId: null,
     forceRefresh: true,
+  });
+}
+
+export async function reclassifyStoredInvestigation(bidId: string) {
+  const existing = await getInvestigationByBidId(bidId);
+  if (!existing) {
+    throw new Error(`Unable to load stored investigation for bid ${bidId}.`);
+  }
+
+  if (existing.fetchStatus !== "fetched") {
+    throw new Error(
+      `Stored investigation for bid ${bidId} is not fetched, so there is not enough persisted evidence to reclassify it.`,
+    );
+  }
+
+  const rawTrace = isRecord(existing.rawTraceJson) ? existing.rawTraceJson : {};
+  const payload = rawTrace.payload;
+  const rawBody =
+    isRecord(payload) &&
+    Object.keys(payload).length === 1 &&
+    typeof payload.raw === "string"
+      ? payload.raw
+      : (payload as RingbaFetchResult["rawBody"]);
+  const responseHeaders = isRecord(rawTrace.responseHeaders)
+    ? Object.fromEntries(
+        Object.entries(rawTrace.responseHeaders)
+          .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+      )
+    : {};
+  const storedFetchResult: RingbaFetchResult = {
+    bidId: existing.bidId,
+    requestUrl: typeof rawTrace.requestUrl === "string" ? rawTrace.requestUrl : "",
+    fetchedAt:
+      typeof rawTrace.fetchedAt === "string"
+        ? rawTrace.fetchedAt
+        : (existing.fetchedAt ?? existing.updatedAt),
+    httpStatusCode:
+      typeof rawTrace.httpStatusCode === "number"
+        ? rawTrace.httpStatusCode
+        : existing.httpStatusCode,
+    ok: true,
+    rawBody: rawBody ?? existing.responseBody,
+    responseHeaders,
+    transportError: typeof rawTrace.transportError === "string" ? rawTrace.transportError : null,
+    errorKind: typeof rawTrace.errorKind === "string" ? rawTrace.errorKind as RingbaFetchResult["errorKind"] : "none",
+    latencyMs: typeof rawTrace.latencyMs === "number" ? rawTrace.latencyMs : 0,
+    attemptCount: typeof rawTrace.attemptCount === "number" ? rawTrace.attemptCount : 1,
+    retryAfterMs: null,
+  };
+
+  const normalizedBid = normalizeRingbaBidDetail(storedFetchResult);
+  const diagnosis = diagnoseBid(normalizedBid);
+
+  return upsertInvestigation({
+    importRunId: existing.importRunId,
+    normalizedBid,
+    diagnosis,
+    persistence: {
+      detailSource: existing.detailSource,
+      enrichmentState: existing.enrichmentState,
+      lastRingbaAttemptAt: existing.lastRingbaAttemptAt,
+      lastRingbaFetchAt: existing.lastRingbaFetchAt,
+      ringbaFailureCount: existing.ringbaFailureCount,
+      nextRingbaRetryAt: existing.nextRingbaRetryAt,
+      fetchedAt: existing.fetchedAt,
+      preserveImportedAt: true,
+    },
   });
 }
 

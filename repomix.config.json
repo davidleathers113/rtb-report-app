@@ -1,0 +1,26 @@
+{
+  "output": {
+    "filePath": "repomix-output.md",
+    "style": "markdown",
+    "removeComments": false,
+    "removeEmptyLines": false,
+    "showLineNumbers": true
+  },
+  "include": [],
+  "ignore": {
+    "useGitignore": true,
+    "useDefaultPatterns": true,
+    "customPatterns": [
+      "pnpm-lock.yaml",
+      "**/*.svg",
+      "**/*.png",
+      "**/*.jpg",
+      "public/",
+      ".next/",
+      "data/*.sqlite*"
+    ]
+  },
+  "security": {
+    "enableSecurityCheck": true
+  }
+}

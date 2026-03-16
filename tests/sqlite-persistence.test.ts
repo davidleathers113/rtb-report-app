@@ -59,6 +59,24 @@ function buildNormalizedBid(bidId: string) {
     relevantEvents: [],
     targetAttempts: [],
     outcome: "accepted" as const,
+    outcomeReasonCategory: "accepted" as const,
+    outcomeReasonCode: null,
+    outcomeReasonMessage: null,
+    classificationSource: "heuristic" as const,
+    classificationConfidence: 0.99,
+    classificationWarnings: [],
+    parseStatus: "complete" as const,
+    normalizationVersion: "test-v1",
+    schemaVariant: "test_fixture",
+    normalizationConfidence: 1,
+    normalizationWarnings: [],
+    missingCriticalFields: [],
+    missingOptionalFields: [],
+    unknownEventNames: [],
+    rawPathsUsed: {},
+    primaryErrorCodeSource: null,
+    primaryErrorCodeConfidence: null,
+    primaryErrorCodeRawMatch: null,
   };
 }
 
@@ -237,12 +255,36 @@ describe.sequential("sqlite persistence integration", () => {
         winningBid: 0,
         isZeroBid: true,
         outcome: "zero_bid",
+        outcomeReasonCategory: "tag_filtered_final",
+        outcomeReasonCode: "1006",
+        outcomeReasonMessage: "Final capacity check (Code: 1006)",
+        classificationSource: "reason_for_reject_text",
+        classificationConfidence: 0.62,
+        classificationWarnings: [],
+        parseStatus: "text_fallback",
+        normalizationConfidence: 0.61,
+        normalizationWarnings: [
+          {
+            code: "primary_error_code_text_fallback",
+            message: "Derived primary error code from text fallback instead of a structured field.",
+            field: "primaryErrorCode",
+          },
+        ],
+        missingCriticalFields: [],
+        missingOptionalFields: ["reasonForReject"],
+        unknownEventNames: [],
+        rawPathsUsed: {
+          primaryErrorCode: ["rejectReason_text"],
+        },
         primaryFailureStage: "zero_bid",
         primaryTargetName: "Oncore Roofing - RTT",
         primaryTargetId: "target-1",
         primaryBuyerName: "Oncore Leads",
         primaryBuyerId: "buyer-1",
         primaryErrorCode: 1006,
+        primaryErrorCodeSource: "rejectReason_text",
+        primaryErrorCodeConfidence: 0.55,
+        primaryErrorCodeRawMatch: "Code: 1006",
         primaryErrorMessage: "Final capacity check (Code: 1006)",
         targetAttempts: [
           {
@@ -289,6 +331,12 @@ describe.sequential("sqlite persistence integration", () => {
 
     const detail = await investigations.getInvestigationByBidId("bid-with-attempts");
     expect(detail?.primaryErrorCode).toBe(1006);
+    expect(detail?.parseStatus).toBe("text_fallback");
+    expect(detail?.normalizationConfidence).toBe(0.61);
+    expect(detail?.normalizationWarnings).toHaveLength(1);
+    expect(detail?.primaryErrorCodeSource).toBe("rejectReason_text");
+    expect(detail?.outcomeReasonCategory).toBe("tag_filtered_final");
+    expect(detail?.classificationSource).toBe("reason_for_reject_text");
     expect(detail?.targetAttempts).toHaveLength(1);
     expect(detail?.sourceContext?.fileName).toBe("recent-export.csv");
     expect(detail?.sourceContext?.rowJson).toEqual({

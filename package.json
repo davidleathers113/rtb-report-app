@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "bundle": "repomix",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "node scripts/migrate-db.mjs",
     "db:reset": "node scripts/reset-db.mjs"
@@ -43,6 +44,7 @@
     "drizzle-kit": "^0.31.9",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "repomix": "^1.12.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^3.2.4"

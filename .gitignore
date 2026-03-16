@@ -24,6 +24,7 @@
 .DS_Store
 *.pem
 *.csv
+repomix-output.md
 
 # debug
 npm-debug.log*
@@ -46,3 +47,5 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+.early.coverage

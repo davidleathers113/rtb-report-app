@@ -26,7 +26,10 @@ import {
   upsertInvestigation,
 } from "@/lib/db/investigations";
 import { diagnoseBid } from "@/lib/diagnostics/rules";
-import { investigateBid } from "@/lib/investigations/service";
+import {
+  investigateBid,
+  reclassifyStoredInvestigation,
+} from "@/lib/investigations/service";
 import { fetchRingbaBidDetail } from "@/lib/ringba/client";
 import { normalizeRingbaBidDetail } from "@/lib/ringba/normalize";
 import type { InvestigationDetail } from "@/types/bid";
@@ -69,6 +72,24 @@ function buildInvestigation(
     events: [],
     sourceContext: null,
     outcome: "accepted",
+    outcomeReasonCategory: "accepted",
+    outcomeReasonCode: null,
+    outcomeReasonMessage: null,
+    classificationSource: "heuristic",
+    classificationConfidence: 0.99,
+    classificationWarnings: [],
+    parseStatus: "complete",
+    normalizationVersion: "test-v1",
+    schemaVariant: "test_fixture",
+    normalizationConfidence: 1,
+    normalizationWarnings: [],
+    missingCriticalFields: [],
+    missingOptionalFields: [],
+    unknownEventNames: [],
+    rawPathsUsed: {},
+    primaryErrorCodeSource: null,
+    primaryErrorCodeConfidence: null,
+    primaryErrorCodeRawMatch: null,
     rootCause: "unknown_needs_review",
     confidence: 0.5,
     severity: "medium",
@@ -185,14 +206,32 @@ describe("investigateBid", () => {
       relevantEvents: [],
       targetAttempts: [],
       outcome: "accepted",
+      outcomeReasonCategory: "accepted",
+      outcomeReasonCode: null,
+      outcomeReasonMessage: null,
+      classificationSource: "heuristic",
+      classificationConfidence: 0.99,
+      classificationWarnings: [],
+      parseStatus: "complete",
+      normalizationVersion: "test-v1",
+      schemaVariant: "test_fixture",
+      normalizationConfidence: 1,
+      normalizationWarnings: [],
+      missingCriticalFields: [],
+      missingOptionalFields: [],
+      unknownEventNames: [],
+      rawPathsUsed: {},
+      primaryErrorCodeSource: null,
+      primaryErrorCodeConfidence: null,
+      primaryErrorCodeRawMatch: null,
     });
     vi.mocked(diagnoseBid).mockReturnValue({
       rootCause: "unknown_needs_review",
-      confidence: 0.5,
-      severity: "medium",
+      confidence: 0.99,
+      severity: "low",
       ownerType: "unknown",
-      suggestedFix: "Review manually.",
-      explanation: "Investigated.",
+      suggestedFix: "No failure remediation is needed for accepted bids.",
+      explanation: "The winning bid was accepted, so failure diagnostics were skipped.",
       evidence: [],
     });
     vi.mocked(upsertInvestigation).mockResolvedValue(buildInvestigation());
@@ -206,7 +245,20 @@ describe("investigateBid", () => {
     expect(fetchRingbaBidDetail).toHaveBeenCalledWith("bid-1", {
       budgetProfile: "default",
     });
-    expect(upsertInvestigation).toHaveBeenCalled();
+    expect(upsertInvestigation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        normalizedBid: expect.objectContaining({
+          outcome: "accepted",
+          outcomeReasonCategory: "accepted",
+          parseStatus: "complete",
+          normalizationVersion: "test-v1",
+        }),
+        diagnosis: expect.objectContaining({
+          rootCause: "unknown_needs_review",
+          severity: "low",
+        }),
+      }),
+    );
     expect(result.fetchTelemetry).toEqual({
       latencyMs: 120,
       attemptCount: 1,
@@ -263,5 +315,110 @@ describe("investigateBid", () => {
       errorKind: "transport_error",
     });
     expect(result.investigation?.fetchStatus).toBe("failed");
+  });
+
+  it("reclassifies a stored fetched investigation from persisted raw payloads", async () => {
+    vi.mocked(getInvestigationByBidId).mockResolvedValue(
+      buildInvestigation({
+        rawTraceJson: {
+          requestUrl: "https://api.example.com/bid-1",
+          fetchedAt: "2026-03-09T00:02:00.000Z",
+          httpStatusCode: 200,
+          errorKind: "none",
+          latencyMs: 120,
+          attemptCount: 1,
+          responseHeaders: {},
+          payload: {
+            bidId: "bid-1",
+            report: {
+              records: [
+                {
+                  bidId: "bid-1",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    vi.mocked(normalizeRingbaBidDetail).mockReturnValue({
+      bidId: "bid-1",
+      bidDt: "2026-03-09T00:00:00.000Z",
+      campaignName: "Campaign",
+      campaignId: "campaign-1",
+      publisherName: "Publisher",
+      publisherId: "publisher-1",
+      targetName: "Target",
+      targetId: "target-1",
+      buyerName: "Buyer",
+      buyerId: "buyer-1",
+      bidAmount: 1.25,
+      winningBid: 1.25,
+      bidElapsedMs: 100,
+      isZeroBid: false,
+      reasonForReject: null,
+      httpStatusCode: 200,
+      errorMessage: null,
+      primaryFailureStage: "accepted",
+      primaryTargetName: null,
+      primaryTargetId: null,
+      primaryBuyerName: null,
+      primaryBuyerId: null,
+      primaryErrorCode: null,
+      primaryErrorMessage: null,
+      requestBody: {},
+      responseBody: {},
+      rawTraceJson: {},
+      relevantEvents: [],
+      targetAttempts: [],
+      outcome: "accepted",
+      outcomeReasonCategory: "accepted",
+      outcomeReasonCode: null,
+      outcomeReasonMessage: null,
+      classificationSource: "heuristic",
+      classificationConfidence: 0.99,
+      classificationWarnings: [],
+      parseStatus: "complete",
+      normalizationVersion: "test-v1",
+      schemaVariant: "test_fixture",
+      normalizationConfidence: 1,
+      normalizationWarnings: [],
+      missingCriticalFields: [],
+      missingOptionalFields: [],
+      unknownEventNames: [],
+      rawPathsUsed: {},
+      primaryErrorCodeSource: null,
+      primaryErrorCodeConfidence: null,
+      primaryErrorCodeRawMatch: null,
+    });
+    vi.mocked(diagnoseBid).mockReturnValue({
+      rootCause: "unknown_needs_review",
+      confidence: 0.5,
+      severity: "medium",
+      ownerType: "unknown",
+      suggestedFix: "Review manually.",
+      explanation: "Investigated.",
+      evidence: [],
+    });
+    vi.mocked(upsertInvestigation).mockResolvedValue(buildInvestigation());
+
+    await reclassifyStoredInvestigation("bid-1");
+
+    expect(normalizeRingbaBidDetail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bidId: "bid-1",
+        requestUrl: "https://api.example.com/bid-1",
+        httpStatusCode: 200,
+        ok: true,
+      }),
+    );
+    expect(upsertInvestigation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        persistence: expect.objectContaining({
+          fetchedAt: "2026-03-09T00:01:00.000Z",
+          preserveImportedAt: true,
+        }),
+      }),
+    );
   });
 });

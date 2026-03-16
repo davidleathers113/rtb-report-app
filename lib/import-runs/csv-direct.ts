@@ -691,10 +691,11 @@ async function streamCsvRows(input: {
 function buildNormalizedBid(row: CsvDirectParsedRow): NormalizedBidData {
   const bidAmount = row.bidAmount;
   const winningBid = row.winningBid;
+  const lowerRejectReason = String(row.reasonForReject ?? "").toLowerCase();
   const isZeroBid =
     bidAmount === 0 ||
     winningBid === 0 ||
-    String(row.reasonForReject ?? "").toLowerCase().includes("zero bid");
+    lowerRejectReason.includes("zero bid");
   const outcome =
     row.bidRejected === true || row.reasonForReject
       ? "rejected"
@@ -703,6 +704,28 @@ function buildNormalizedBid(row: CsvDirectParsedRow): NormalizedBidData {
         : bidAmount !== null || winningBid !== null
           ? "accepted"
           : "unknown";
+  const outcomeReasonCategory =
+    outcome === "accepted"
+      ? "accepted"
+      : lowerRejectReason.includes("caller_id_required")
+        ? "missing_caller_id"
+        : lowerRejectReason.includes("initial tag filter") || lowerRejectReason.includes("1002")
+          ? "tag_filtered_initial"
+          : lowerRejectReason.includes("final capacity check") ||
+              lowerRejectReason.includes("final tag filter") ||
+              lowerRejectReason.includes("1006")
+            ? "tag_filtered_final"
+            : lowerRejectReason.includes("zero bid")
+              ? "buyer_returned_zero_bid"
+              : row.reasonForReject
+                ? "unknown_no_payable_bid"
+                : null;
+  const classificationSource =
+    outcomeReasonCategory === "accepted"
+      ? "heuristic"
+      : row.reasonForReject
+        ? "reason_for_reject_text"
+        : null;
 
   return {
     bidId: row.bidId ?? "",
@@ -751,6 +774,34 @@ function buildNormalizedBid(row: CsvDirectParsedRow): NormalizedBidData {
     relevantEvents: [],
     targetAttempts: [],
     outcome,
+    outcomeReasonCategory,
+    outcomeReasonCode: row.reasonForReject && lowerRejectReason.includes("1006")
+      ? "1006"
+      : row.reasonForReject && lowerRejectReason.includes("1002")
+        ? "1002"
+        : null,
+    outcomeReasonMessage: row.reasonForReject,
+    classificationSource,
+    classificationConfidence: classificationSource === null ? null : 0.72,
+    classificationWarnings: [],
+    parseStatus: "complete",
+    normalizationVersion: "csv-direct-v1",
+    schemaVariant: "csv_direct_row",
+    normalizationConfidence: 1,
+    normalizationWarnings: [],
+    missingCriticalFields: [],
+    missingOptionalFields: [],
+    unknownEventNames: [],
+    rawPathsUsed: {
+      bidId: ["csv.bidId"],
+      bidDt: ["csv.bidDt"],
+      campaignId: ["csv.campaignId"],
+      publisherId: ["csv.publisherId"],
+      reasonForReject: ["csv.reasonForReject"],
+    },
+    primaryErrorCodeSource: null,
+    primaryErrorCodeConfidence: null,
+    primaryErrorCodeRawMatch: null,
   };
 }
 

@@ -30,6 +30,35 @@ export const DIAGNOSIS_SEVERITIES = [
 export const OUTCOMES = ["accepted", "rejected", "zero_bid", "unknown"] as const;
 export const FETCH_STATUSES = ["pending", "fetched", "failed"] as const;
 export const DETAIL_SOURCES = ["csv_direct", "ringba_api"] as const;
+export const OUTCOME_REASON_CATEGORIES = [
+  "accepted",
+  "buyer_returned_zero_bid",
+  "missing_required_field",
+  "missing_caller_id",
+  "tag_filtered_initial",
+  "tag_filtered_final",
+  "no_matching_buyer",
+  "no_capacity",
+  "request_invalid",
+  "rate_limited",
+  "unknown_no_payable_bid",
+] as const;
+export const CLASSIFICATION_SOURCES = [
+  "primary_attempt_structured",
+  "response_body_structured",
+  "primary_attempt_error_code",
+  "top_level_error",
+  "reason_for_reject_text",
+  "is_zero_bid_flag",
+  "heuristic",
+] as const;
+export const NORMALIZATION_PARSE_STATUSES = [
+  "complete",
+  "partial",
+  "text_fallback",
+  "shape_unknown",
+  "not_attempted",
+] as const;
 export const ENRICHMENT_STATES = [
   "csv_only",
   "queued",
@@ -53,8 +82,23 @@ export type DiagnosisSeverity = (typeof DIAGNOSIS_SEVERITIES)[number];
 export type InvestigationOutcome = (typeof OUTCOMES)[number];
 export type FetchStatus = (typeof FETCH_STATUSES)[number];
 export type DetailSource = (typeof DETAIL_SOURCES)[number];
+export type OutcomeReasonCategory = (typeof OUTCOME_REASON_CATEGORIES)[number];
+export type ClassificationSource = (typeof CLASSIFICATION_SOURCES)[number];
+export type NormalizationParseStatus = (typeof NORMALIZATION_PARSE_STATUSES)[number];
 export type EnrichmentState = (typeof ENRICHMENT_STATES)[number];
 export type FailureStage = (typeof FAILURE_STAGES)[number];
+
+export interface NormalizationWarning {
+  code: string;
+  message: string;
+  field: string | null;
+}
+
+export interface ClassificationWarning {
+  code: string;
+  message: string;
+  field: string | null;
+}
 
 export interface BidEvent {
   id?: string;
@@ -139,6 +183,24 @@ export interface NormalizedBidData {
   relevantEvents: BidEvent[];
   targetAttempts: BidTargetAttempt[];
   outcome: InvestigationOutcome;
+  outcomeReasonCategory: OutcomeReasonCategory | null;
+  outcomeReasonCode: string | null;
+  outcomeReasonMessage: string | null;
+  classificationSource: ClassificationSource | null;
+  classificationConfidence: number | null;
+  classificationWarnings: ClassificationWarning[];
+  parseStatus: NormalizationParseStatus;
+  normalizationVersion: string | null;
+  schemaVariant: string | null;
+  normalizationConfidence: number | null;
+  normalizationWarnings: NormalizationWarning[];
+  missingCriticalFields: string[];
+  missingOptionalFields: string[];
+  unknownEventNames: string[];
+  rawPathsUsed: Record<string, string[]>;
+  primaryErrorCodeSource: string | null;
+  primaryErrorCodeConfidence: number | null;
+  primaryErrorCodeRawMatch: string | null;
 }
 
 export interface DiagnosisEvidence {
@@ -200,9 +262,19 @@ export interface InvestigationListItem {
   severity: DiagnosisSeverity;
   explanation: string;
   outcome: InvestigationOutcome;
+  outcomeReasonCategory: OutcomeReasonCategory | null;
+  outcomeReasonCode: string | null;
+  outcomeReasonMessage: string | null;
+  classificationSource: ClassificationSource | null;
+  classificationConfidence: number | null;
   detailSource: DetailSource;
   enrichmentState: EnrichmentState;
   fetchStatus: FetchStatus;
+  parseStatus: NormalizationParseStatus;
+  schemaVariant: string | null;
+  normalizationConfidence: number | null;
+  normalizationWarningCount: number;
+  primaryErrorCodeSource: string | null;
   fetchedAt: string | null;
   lastError: string | null;
   importedAt: string;

@@ -58,6 +58,179 @@ function minimumRevenueThreshold() {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function acceptedBidNeutralDiagnosis(
+  bid: NormalizedBidData,
+  evidence: DiagnosisEvidence[],
+): DiagnosisResult {
+  pushEvidence(
+    evidence,
+    "outcome",
+    bid.outcome,
+    "Diagnostics skipped failure heuristics because the bid was accepted.",
+  );
+  pushEvidence(
+    evidence,
+    "outcomeReasonCategory",
+    bid.outcomeReasonCategory,
+    "Normalization already identified this bid as accepted.",
+  );
+
+  return {
+    rootCause: "unknown_needs_review",
+    confidence: 0.99,
+    severity: "low",
+    ownerType: "unknown",
+    suggestedFix:
+      "No failure remediation is needed because the bid was accepted. Review the trace only if you need additional context on rejected sibling attempts.",
+    explanation:
+      "The winning bid was accepted, so diagnostics skipped failure-oriented heuristics that may still appear in rejected sibling attempts.",
+    evidence,
+  };
+}
+
+function derivedClassificationRule(
+  bid: NormalizedBidData,
+  evidence: DiagnosisEvidence[],
+): RuleMatch {
+  if (!bid.outcomeReasonCategory || bid.outcomeReasonCategory === "accepted") {
+    return { matched: false };
+  }
+
+  pushEvidence(
+    evidence,
+    "outcomeReasonCategory",
+    bid.outcomeReasonCategory,
+    "Structured normalization classified the bid outcome before diagnostics ran.",
+  );
+  pushEvidence(
+    evidence,
+    "outcomeReasonCode",
+    bid.outcomeReasonCode,
+    "Derived classification code from normalization.",
+  );
+  pushEvidence(
+    evidence,
+    "classificationSource",
+    bid.classificationSource,
+    "Where the derived classification came from.",
+  );
+
+  const derivedConfidence = Math.max(0.55, Math.min(0.99, bid.classificationConfidence ?? 0.8));
+
+  switch (bid.outcomeReasonCategory) {
+    case "missing_caller_id":
+      return {
+        matched: true,
+        result: {
+          rootCause: "missing_caller_id",
+          confidence: derivedConfidence,
+          severity: "high",
+          ownerType: "publisher",
+          suggestedFix:
+            "Confirm the upstream source populates caller_id and that Ringba maps it into the buyer payload.",
+          explanation:
+            "Structured Ringba response details show the bid failed because caller_id was required but not provided.",
+          evidence,
+        },
+      };
+    case "missing_required_field":
+      return {
+        matched: true,
+        result: {
+          rootCause: "missing_zip_or_required_payload_field",
+          confidence: derivedConfidence,
+          severity: "high",
+          ownerType: "publisher",
+          suggestedFix:
+            "Validate the upstream payload and Ringba mappings for zip and other required fields before bidding.",
+          explanation:
+            "Structured Ringba response details show a required request field was missing before a payable bid could be returned.",
+          evidence,
+        },
+      };
+    case "request_invalid":
+      return {
+        matched: true,
+        result: {
+          rootCause: "payload_validation_error",
+          confidence: derivedConfidence,
+          severity: "high",
+          ownerType: "publisher",
+          suggestedFix:
+            "Compare the buyer contract with the generated request payload and correct invalid or missing values.",
+          explanation:
+            "Structured Ringba response details show the buyer rejected the request as invalid before bidding.",
+          evidence,
+        },
+      };
+    case "rate_limited":
+      return {
+        matched: true,
+        result: {
+          rootCause: "rate_limited",
+          confidence: derivedConfidence,
+          severity: "high",
+          ownerType: "buyer",
+          suggestedFix:
+            "Review buyer-side throttling, request pacing, and any per-publisher traffic caps.",
+          explanation:
+            "Structured Ringba response details show the bid was blocked by rate limiting rather than a normal bid decision.",
+          evidence,
+        },
+      };
+    case "buyer_returned_zero_bid":
+      return {
+        matched: true,
+        result: {
+          rootCause: "buyer_returned_zero_bid",
+          confidence: derivedConfidence,
+          severity: "medium",
+          ownerType: "buyer",
+          suggestedFix:
+            "Review buyer capacity, pricing, and targeting to understand why the request produced no payable bid.",
+          explanation:
+            "Structured Ringba response details indicate the buyer evaluated the request but did not return a payable bid.",
+          evidence,
+        },
+      };
+    case "tag_filtered_initial":
+    case "tag_filtered_final":
+    case "no_matching_buyer":
+    case "no_capacity":
+      return {
+        matched: true,
+        result: {
+          rootCause: "no_eligible_targets",
+          confidence: derivedConfidence,
+          severity: "medium",
+          ownerType: "ringba_config",
+          suggestedFix:
+            "Review Ringba routing, target filters, buyer eligibility, and capacity settings for this campaign.",
+          explanation:
+            "Structured Ringba response details show the bid failed during routing, filtering, or buyer matching rather than from a true zero-price bid.",
+          evidence,
+        },
+      };
+    case "unknown_no_payable_bid":
+      return {
+        matched: true,
+        result: {
+          rootCause: "unknown_needs_review",
+          confidence: Math.min(derivedConfidence, 0.6),
+          severity: "medium",
+          ownerType: "unknown",
+          suggestedFix:
+            "Inspect the structured response, reject reason, and target attempts to refine this no-payable-bid classification.",
+          explanation:
+            "Normalization identified a no-payable-bid outcome, but the stored evidence was not specific enough to assign a stronger root cause.",
+          evidence,
+        },
+      };
+    default:
+      return { matched: false };
+  }
+}
+
 function rateLimitedRule(
   bid: NormalizedBidData,
   contextText: string,
@@ -434,9 +607,18 @@ function noEligibleTargetsRule(
 
 export function diagnoseBid(normalizedBid: NormalizedBidData): DiagnosisResult {
   const evidence: DiagnosisEvidence[] = [];
+
+  if (
+    normalizedBid.outcome === "accepted" ||
+    normalizedBid.outcomeReasonCategory === "accepted"
+  ) {
+    return acceptedBidNeutralDiagnosis(normalizedBid, evidence);
+  }
+
   const contextText = buildContextText(normalizedBid);
 
   const rules = [
+    derivedClassificationRule(normalizedBid, evidence),
     rateLimitedRule(normalizedBid, contextText, evidence),
     missingCallerIdRule(normalizedBid, contextText, evidence),
     missingZipRule(normalizedBid, contextText, evidence),

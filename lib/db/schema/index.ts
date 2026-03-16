@@ -53,6 +53,34 @@ export const bidInvestigations = sqliteTable(
     responseBody: text("response_body", { mode: "json" }),
     rawTraceJson: text("raw_trace_json", { mode: "json" }).notNull().default(sql`'{}'`),
     outcome: text("outcome").notNull().default("unknown"),
+    outcomeReasonCategory: text("outcome_reason_category"),
+    outcomeReasonCode: text("outcome_reason_code"),
+    outcomeReasonMessage: text("outcome_reason_message"),
+    classificationSource: text("classification_source"),
+    classificationConfidence: real("classification_confidence"),
+    classificationWarningsJson: text("classification_warnings_json", { mode: "json" })
+      .notNull()
+      .default(sql`'[]'`),
+    parseStatus: text("parse_status").notNull().default("not_attempted"),
+    normalizationVersion: text("normalization_version"),
+    schemaVariant: text("schema_variant"),
+    normalizationConfidence: real("normalization_confidence"),
+    normalizationWarningsJson: text("normalization_warnings_json", { mode: "json" })
+      .notNull()
+      .default(sql`'[]'`),
+    missingCriticalFieldsJson: text("missing_critical_fields_json", { mode: "json" })
+      .notNull()
+      .default(sql`'[]'`),
+    missingOptionalFieldsJson: text("missing_optional_fields_json", { mode: "json" })
+      .notNull()
+      .default(sql`'[]'`),
+    unknownEventNamesJson: text("unknown_event_names_json", { mode: "json" })
+      .notNull()
+      .default(sql`'[]'`),
+    rawPathsUsedJson: text("raw_paths_used_json", { mode: "json" }).notNull().default(sql`'{}'`),
+    primaryErrorCodeSource: text("primary_error_code_source"),
+    primaryErrorCodeConfidence: real("primary_error_code_confidence"),
+    primaryErrorCodeRawMatch: text("primary_error_code_raw_match"),
     rootCause: text("root_cause").notNull().default("unknown_needs_review"),
     rootCauseConfidence: real("root_cause_confidence").notNull().default(0),
     severity: text("severity").notNull().default("high"),
