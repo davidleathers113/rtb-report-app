@@ -9,7 +9,10 @@ import {
   getImportRunDetail,
   getImportSourceCheckpoint,
 } from "@/lib/db/import-runs";
-import type { HistoricalBackfillSourceMetadata } from "@/types/import-run";
+import type {
+  HistoricalBackfillSourceMetadata,
+  RingbaBudgetProfileName,
+} from "@/types/import-run";
 
 export interface CreateHistoricalRingbaBackfillRunInput {
   startBidDt?: string;
@@ -19,17 +22,56 @@ export interface CreateHistoricalRingbaBackfillRunInput {
   campaignId?: string;
   publisherId?: string;
   sourceImportRunId?: string;
+  sourceImportRunIds?: string[];
   forceRefresh: boolean;
   pilotLabel?: string;
   triggerType?: "manual" | "scheduled";
   scheduleId?: string | null;
   scheduleName?: string;
   checkpointSourceKey?: string | null;
+  throttleProfileName?: RingbaBudgetProfileName;
+}
+
+function dedupeImportRunIds(values: string[]) {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) {
+      continue;
+    }
+
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+
+  return normalized;
+}
+
+function resolveSourceImportRunIds(input: CreateHistoricalRingbaBackfillRunInput) {
+  const values = dedupeImportRunIds([
+    ...(input.sourceImportRunIds ?? []),
+    ...(input.sourceImportRunId ? [input.sourceImportRunId] : []),
+  ]);
+
+  return values;
+}
+
+function resolveHistoricalThrottleProfileName(input: CreateHistoricalRingbaBackfillRunInput) {
+  if (input.throttleProfileName) {
+    return input.throttleProfileName;
+  }
+
+  const selectedRunIds = resolveSourceImportRunIds(input);
+  return selectedRunIds.length > 0 ? "direct_csv_bulk" : "historical_backfill";
 }
 
 export async function createHistoricalRingbaBackfillRun(
   input: CreateHistoricalRingbaBackfillRunInput,
 ) {
+  const sourceImportRunIds = resolveSourceImportRunIds(input);
+  const throttleProfileName = resolveHistoricalThrottleProfileName(input);
   const checkpoint =
     input.checkpointSourceKey ? await getImportSourceCheckpoint(input.checkpointSourceKey) : null;
   const checkpointSourceMetadata =
@@ -48,7 +90,7 @@ export async function createHistoricalRingbaBackfillRun(
     endBidDt: input.endBidDt,
     campaignId: input.campaignId,
     publisherId: input.publisherId,
-    sourceImportRunId: input.sourceImportRunId,
+    sourceImportRunIds,
   });
   const candidates = await listHistoricalBackfillCandidates({
     startBidDt: input.startBidDt,
@@ -59,7 +101,7 @@ export async function createHistoricalRingbaBackfillRun(
     cursorBidId,
     campaignId: input.campaignId,
     publisherId: input.publisherId,
-    sourceImportRunId: input.sourceImportRunId,
+    sourceImportRunIds,
   });
 
   const selectedBidIds = candidates.map((candidate) => candidate.bidId);
@@ -71,10 +113,11 @@ export async function createHistoricalRingbaBackfillRun(
       limit: input.limit,
       campaignId: input.campaignId ?? null,
       publisherId: input.publisherId ?? null,
-      sourceImportRunId: input.sourceImportRunId ?? null,
+      sourceImportRunId: sourceImportRunIds[0] ?? null,
+      sourceImportRunIds,
     },
     pilotLabel: input.pilotLabel ?? null,
-    throttleProfileName: "historical_backfill_default",
+    throttleProfileName,
     checkpointSourceKey: input.checkpointSourceKey ?? null,
     checkpointCursor: {
       bidDt: cursorBidDt ?? null,
@@ -108,6 +151,10 @@ export async function createHistoricalRingbaBackfillRun(
         ? `Scheduled historical Ringba backfill from ${input.scheduleName}.`
         : input.pilotLabel && input.pilotLabel.trim()
           ? `Historical Ringba backfill pilot: ${input.pilotLabel.trim()}`
+          : sourceImportRunIds.length === 1
+            ? `Historical Ringba backfill for direct CSV run ${sourceImportRunIds[0]}.`
+            : sourceImportRunIds.length > 1
+              ? `Historical Ringba backfill for ${sourceImportRunIds.length} direct CSV runs.`
           : "Historical Ringba backfill.",
     sourceWindowStart: input.startBidDt ?? null,
     sourceWindowEnd: input.endBidDt ?? null,

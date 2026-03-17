@@ -9,6 +9,7 @@ import {
   finalizeImportRun,
   getImportRunBidIds,
   getImportRunDetail,
+  listRecoverableCsvDirectImportRunIds,
   markImportRunFailed,
   resetFailedImportRunItems,
   upsertImportSourceCheckpoint,
@@ -31,9 +32,19 @@ import type {
   HistoricalBackfillMetrics,
   HistoricalBackfillSourceMetadata,
   ImportRunDetail,
+  ImportRunProcessorMetadata,
+  ImportRunProcessorMode,
+  ImportRunStatus,
+  RingbaBudgetProfileName,
 } from "@/types/import-run";
 
 const IMPORT_RUN_DETAIL_ITEM_LIMIT = 250;
+const TERMINAL_IMPORT_RUN_STATUSES = new Set<ImportRunStatus>([
+  "completed",
+  "completed_with_errors",
+  "failed",
+  "cancelled",
+]);
 
 function dedupeBidIds(bidIds: string[]) {
   const values: string[] = [];
@@ -50,6 +61,73 @@ function dedupeBidIds(bidIds: string[]) {
   }
 
   return values;
+}
+
+function isTerminalImportRunStatus(status: ImportRunStatus) {
+  return TERMINAL_IMPORT_RUN_STATUSES.has(status);
+}
+
+function getProcessorMetadata(sourceMetadata: Record<string, unknown>) {
+  const processor = sourceMetadata.processor;
+  if (!processor || typeof processor !== "object" || Array.isArray(processor)) {
+    return null;
+  }
+
+  return processor as ImportRunProcessorMetadata;
+}
+
+function mergeProcessorMetadata(
+  sourceMetadata: Record<string, unknown>,
+  patch: ImportRunProcessorMetadata,
+) {
+  return {
+    ...sourceMetadata,
+    processor: {
+      ...(getProcessorMetadata(sourceMetadata) ?? {}),
+      ...patch,
+    },
+  };
+}
+
+function getHistoricalThrottleProfileName(
+  sourceMetadata: Record<string, unknown>,
+): RingbaBudgetProfileName {
+  return sourceMetadata.throttleProfileName === "direct_csv_bulk"
+    ? "direct_csv_bulk"
+    : "historical_backfill";
+}
+
+function hasImportRunProgressChanged(previous: ImportRunDetail, next: ImportRunDetail) {
+  return (
+    previous.status !== next.status ||
+    previous.queuedCount !== next.queuedCount ||
+    previous.runningCount !== next.runningCount ||
+    previous.completedCount !== next.completedCount ||
+    previous.failedCount !== next.failedCount ||
+    previous.processorLeaseExpiresAt !== next.processorLeaseExpiresAt ||
+    previous.isStalled !== next.isStalled
+  );
+}
+
+async function stampImportRunProcessor(
+  detail: ImportRunDetail,
+  processorMode: ImportRunProcessorMode,
+  extras?: Partial<ImportRunProcessorMetadata>,
+) {
+  if (detail.sourceType !== "csv_direct_import") {
+    return detail;
+  }
+
+  const updated = await updateImportRunSourceState({
+    importRunId: detail.id,
+    sourceMetadata: mergeProcessorMetadata(detail.sourceMetadata, {
+      mode: processorMode,
+      lastHeartbeatAt: new Date().toISOString(),
+      ...extras,
+    }),
+  });
+
+  return updated ?? detail;
 }
 
 async function syncScheduledRunStatus(run: ImportRunDetail | null | undefined) {
@@ -269,6 +347,7 @@ export async function processImportRun(input: {
   importRunId: string;
   batchSize?: number;
   maxBatches?: number;
+  processorMode?: ImportRunProcessorMode;
 }) {
   const claim = await claimImportRunProcessing({
     importRunId: input.importRunId,
@@ -293,6 +372,10 @@ export async function processImportRun(input: {
 
     if (!current) {
       throw new Error(`Import run not found: ${input.importRunId}`);
+    }
+
+    if (input.processorMode) {
+      current = await stampImportRunProcessor(current, input.processorMode);
     }
 
     if (
@@ -351,6 +434,10 @@ export async function processImportRun(input: {
             importRunId: input.importRunId,
             forceRefresh: claim.forceRefresh,
             sourceType: current.sourceType,
+            ringbaBudgetProfile:
+              current.sourceType === "historical_ringba_backfill"
+                ? getHistoricalThrottleProfileName(current.sourceMetadata)
+                : null,
           });
           const investigation = result.investigation;
 
@@ -414,9 +501,21 @@ export async function processImportRun(input: {
       }
 
       batchesProcessed += 1;
+
+      if (input.processorMode && current.sourceType === "csv_direct_import") {
+        const updated = await stampImportRunProcessor(current, input.processorMode);
+        if (updated) {
+          current = updated;
+        }
+      }
     }
 
-    const detail = await finalizeImportRun(input.importRunId);
+    let detail = await finalizeImportRun(input.importRunId);
+    if (detail && input.processorMode) {
+      detail = await stampImportRunProcessor(detail, input.processorMode, {
+        lastCompletedAt: detail.completedAt ?? detail.updatedAt,
+      });
+    }
     await syncScheduledRunStatus(detail);
     return detail;
   } catch (error) {
@@ -427,6 +526,92 @@ export async function processImportRun(input: {
     await syncScheduledRunStatus(detail);
     return detail;
   }
+}
+
+export async function drainImportRunToCompletion(input: {
+  importRunId: string;
+  batchSize?: number;
+  maxBatchesPerPass?: number;
+  processorMode?: ImportRunProcessorMode;
+  maxPasses?: number;
+}) {
+  let current = await getImportRunDetail(input.importRunId, {
+    itemLimit: IMPORT_RUN_DETAIL_ITEM_LIMIT,
+  });
+
+  if (!current) {
+    throw new Error(`Import run not found: ${input.importRunId}`);
+  }
+
+  const maxPasses = Math.max(1, input.maxPasses ?? 1000);
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    if (isTerminalImportRunStatus(current.status)) {
+      return current;
+    }
+
+    const next = await processImportRun({
+      importRunId: input.importRunId,
+      batchSize: input.batchSize,
+      maxBatches: input.maxBatchesPerPass,
+      processorMode: input.processorMode,
+    });
+
+    if (!next) {
+      throw new Error(`Import run disappeared during drain: ${input.importRunId}`);
+    }
+
+    if (isTerminalImportRunStatus(next.status) || !hasImportRunProgressChanged(current, next)) {
+      return next;
+    }
+
+    current = next;
+  }
+
+  return current;
+}
+
+export async function recoverCsvDirectImportRuns(input?: {
+  importRunIds?: string[];
+  stalledOnly?: boolean;
+  batchSize?: number;
+  maxBatchesPerPass?: number;
+  maxRuns?: number;
+  createHistoricalBackfill?: boolean;
+  historicalBackfillLimit?: number;
+  historicalBackfillSort?: "newest_first" | "oldest_first";
+}) {
+  const targetRunIds = await listRecoverableCsvDirectImportRunIds({
+    importRunIds: input?.importRunIds,
+    limit: input?.maxRuns,
+    stalledOnly: input?.stalledOnly,
+  });
+  const recoveredRuns: ImportRunDetail[] = [];
+  const createdBackfillRuns: ImportRunDetail[] = [];
+
+  for (const importRunId of targetRunIds) {
+    const recoveredRun = await drainImportRunToCompletion({
+      importRunId,
+      batchSize: input?.batchSize,
+      maxBatchesPerPass: input?.maxBatchesPerPass,
+      processorMode: "background_recovery",
+    });
+    recoveredRuns.push(recoveredRun);
+
+    if (input?.createHistoricalBackfill) {
+      const backfillRun = await createHistoricalRingbaBackfillRun({
+        limit: input.historicalBackfillLimit ?? 250,
+        sort: input.historicalBackfillSort ?? "oldest_first",
+        sourceImportRunIds: [importRunId],
+        forceRefresh: false,
+      });
+      createdBackfillRuns.push(backfillRun);
+    }
+  }
+
+  return {
+    recoveredRuns,
+    createdBackfillRuns,
+  };
 }
 
 export async function retryFailedImportRunItems(input: {

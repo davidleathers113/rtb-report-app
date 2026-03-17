@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { RingbaBudgetProfileName } from "@/types/import-run";
+
 function sleep(milliseconds: number) {
   return new Promise((resolve) => {
     setTimeout(resolve, milliseconds);
@@ -33,6 +35,18 @@ interface RingbaBudgetConfig {
   requestsPerMinute: number;
   jitterMsMin: number;
   jitterMsMax: number;
+}
+
+interface RingbaBudgetProfileConfig {
+  profileName: RingbaBudgetProfileName;
+  concurrencyEnvName: string;
+  requestsPerMinuteEnvName: string;
+  jitterMinEnvName: string;
+  jitterMaxEnvName: string;
+  defaultConcurrency: number;
+  defaultRequestsPerMinute: number;
+  defaultJitterMsMin: number;
+  defaultJitterMsMax: number;
 }
 
 let activeCount = 0;
@@ -87,20 +101,52 @@ async function reserveRequestWindow(config: RingbaBudgetConfig) {
   }
 }
 
-function getBackfillBudgetConfig(): RingbaBudgetConfig {
-  const jitterMsMin = readPositiveIntEnv("RINGBA_BACKFILL_JITTER_MS_MIN", 250);
-  const jitterMsMax = readPositiveIntEnv("RINGBA_BACKFILL_JITTER_MS_MAX", 1000);
+const RINGBA_BUDGET_PROFILES: Record<RingbaBudgetProfileName, RingbaBudgetProfileConfig> = {
+  historical_backfill: {
+    profileName: "historical_backfill",
+    concurrencyEnvName: "RINGBA_BACKFILL_CONCURRENCY",
+    requestsPerMinuteEnvName: "RINGBA_BACKFILL_REQUESTS_PER_MINUTE",
+    jitterMinEnvName: "RINGBA_BACKFILL_JITTER_MS_MIN",
+    jitterMaxEnvName: "RINGBA_BACKFILL_JITTER_MS_MAX",
+    defaultConcurrency: 1,
+    defaultRequestsPerMinute: 30,
+    defaultJitterMsMin: 250,
+    defaultJitterMsMax: 1000,
+  },
+  direct_csv_bulk: {
+    profileName: "direct_csv_bulk",
+    concurrencyEnvName: "RINGBA_DIRECT_CSV_CONCURRENCY",
+    requestsPerMinuteEnvName: "RINGBA_DIRECT_CSV_REQUESTS_PER_MINUTE",
+    jitterMinEnvName: "RINGBA_DIRECT_CSV_JITTER_MS_MIN",
+    jitterMaxEnvName: "RINGBA_DIRECT_CSV_JITTER_MS_MAX",
+    defaultConcurrency: 1,
+    defaultRequestsPerMinute: 100,
+    defaultJitterMsMin: 250,
+    defaultJitterMsMax: 1000,
+  },
+};
+
+function getBudgetConfig(profileName: RingbaBudgetProfileName): RingbaBudgetConfig {
+  const profile = RINGBA_BUDGET_PROFILES[profileName];
+  const jitterMsMin = readPositiveIntEnv(profile.jitterMinEnvName, profile.defaultJitterMsMin);
+  const jitterMsMax = readPositiveIntEnv(profile.jitterMaxEnvName, profile.defaultJitterMsMax);
 
   return {
-    concurrency: readPositiveIntEnv("RINGBA_BACKFILL_CONCURRENCY", 1),
-    requestsPerMinute: readPositiveIntEnv("RINGBA_BACKFILL_REQUESTS_PER_MINUTE", 30),
+    concurrency: readPositiveIntEnv(profile.concurrencyEnvName, profile.defaultConcurrency),
+    requestsPerMinute: readPositiveIntEnv(
+      profile.requestsPerMinuteEnvName,
+      profile.defaultRequestsPerMinute,
+    ),
     jitterMsMin,
     jitterMsMax: Math.max(jitterMsMin, jitterMsMax),
   };
 }
 
-export async function withHistoricalRingbaBudget<T>(operation: () => Promise<T>) {
-  const config = getBackfillBudgetConfig();
+export async function withRingbaBudget<T>(
+  profileName: RingbaBudgetProfileName,
+  operation: () => Promise<T>,
+) {
+  const config = getBudgetConfig(profileName);
   await acquireConcurrency(config.concurrency);
 
   try {
@@ -109,4 +155,8 @@ export async function withHistoricalRingbaBudget<T>(operation: () => Promise<T>)
   } finally {
     releaseConcurrency();
   }
+}
+
+export async function withHistoricalRingbaBudget<T>(operation: () => Promise<T>) {
+  return withRingbaBudget("historical_backfill", operation);
 }

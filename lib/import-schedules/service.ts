@@ -59,7 +59,7 @@ function buildScheduleSourceMetadata(input: {
     backfillLimit: input.backfillLimit ?? 10,
     backfillSort: input.backfillSort ?? "newest_first",
     pilotLabel: input.pilotLabel ?? null,
-    throttleProfileName: "historical_backfill_default",
+    throttleProfileName: "historical_backfill",
   };
 }
 

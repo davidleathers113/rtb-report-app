@@ -1,7 +1,8 @@
 import "server-only";
 
-import { withHistoricalRingbaBudget } from "@/lib/ringba/budget";
+import { withRingbaBudget } from "@/lib/ringba/budget";
 import { safeJsonParse } from "@/lib/utils/json";
+import type { RingbaBudgetProfileName } from "@/types/import-run";
 
 export interface RingbaConfig {
   accountId: string;
@@ -32,7 +33,7 @@ export interface RingbaFetchResult {
 }
 
 export interface FetchRingbaBidDetailOptions {
-  budgetProfile?: "default" | "historical_backfill";
+  budgetProfile?: "default" | RingbaBudgetProfileName;
 }
 
 function getRequiredEnv(name: string) {
@@ -274,8 +275,9 @@ export async function fetchRingbaBidDetail(
     bidId,
   )}`;
   const timeoutMs = readPositiveIntEnv("RINGBA_BID_DETAIL_TIMEOUT_MS", 15000);
-  const useHistoricalBudget = options?.budgetProfile === "historical_backfill";
-  const maxAttempts = useHistoricalBudget
+  const budgetProfile = options?.budgetProfile ?? "default";
+  const useBudget = budgetProfile !== "default";
+  const maxAttempts = budgetProfile === "historical_backfill"
     ? Math.max(1, 1 + readPositiveIntEnv("RINGBA_BACKFILL_MAX_RETRIES", 3))
     : 1;
   const headers = {
@@ -289,15 +291,15 @@ export async function fetchRingbaBidDetail(
     const executeFetch = async () => {
       return performFetchAttempt(bidId, requestUrl, headers, timeoutMs);
     };
-    const result = useHistoricalBudget
-      ? await withHistoricalRingbaBudget(executeFetch)
+    const result = useBudget
+      ? await withRingbaBudget(budgetProfile, executeFetch)
       : await executeFetch();
     lastResult = {
       ...result,
       attemptCount: attemptNumber,
     };
 
-    if (!useHistoricalBudget || !shouldRetryResult(lastResult) || attemptNumber >= maxAttempts) {
+    if (!useBudget || !shouldRetryResult(lastResult) || attemptNumber >= maxAttempts) {
       return lastResult;
     }
 

@@ -23,6 +23,7 @@ import type {
   ImportRunDetail,
   ImportRunExportDownloadStatus,
   ImportRunItemResolution,
+  ImportRunProcessorMetadata,
   ImportRunItemStatus,
   ImportRunSourceStage,
   ImportRunSourceType,
@@ -120,6 +121,39 @@ function deriveImportRunStatus(items: ImportRunItemRow[]) {
 
 function normalizeSourceMetadata(value: Record<string, unknown> | null) {
   return value ?? {};
+}
+
+function getImportRunProcessorMetadata(sourceMetadata: Record<string, unknown>) {
+  const processor = sourceMetadata.processor;
+  if (!processor || typeof processor !== "object" || Array.isArray(processor)) {
+    return null;
+  }
+
+  return processor as ImportRunProcessorMetadata;
+}
+
+function getImportRunProcessorMode(sourceMetadata: Record<string, unknown>) {
+  const processor = getImportRunProcessorMetadata(sourceMetadata);
+  if (!processor) {
+    return null;
+  }
+
+  return processor.mode === "manual_step" || processor.mode === "background_recovery"
+    ? processor.mode
+    : null;
+}
+
+function hasActiveProcessorLease(
+  run: Pick<ImportRunRow, "processorLeaseExpiresAt">,
+  referenceTime: string,
+) {
+  const leaseMs = toTimestamp(run.processorLeaseExpiresAt);
+  const referenceMs = toTimestamp(referenceTime);
+  if (leaseMs === null || referenceMs === null) {
+    return false;
+  }
+
+  return leaseMs > referenceMs;
 }
 
 function mapImportRunItem(
@@ -371,6 +405,16 @@ export async function getImportRunDetail(
     investigations.map((investigation) => [investigation.id, investigation]),
   );
   const progress = await getImportRunProgress(importRunId);
+  const sourceMetadata = normalizeSourceMetadata(
+    (run.sourceMetadata ?? null) as Record<string, unknown> | null,
+  );
+  const processorMode = getImportRunProcessorMode(sourceMetadata);
+  const isStalled =
+    run.status === "running" &&
+    run.sourceStage === "processing" &&
+    progress.queuedCount > 0 &&
+    progress.runningCount === 0 &&
+    !hasActiveProcessorLease(run, nowIso());
 
   return {
     id: run.id,
@@ -387,16 +431,80 @@ export async function getImportRunDetail(
     exportJobId: run.exportJobId,
     exportRowCount: run.exportRowCount,
     exportDownloadStatus: run.exportDownloadStatus as ImportRunExportDownloadStatus | null,
-    sourceMetadata: normalizeSourceMetadata(
-      (run.sourceMetadata ?? null) as Record<string, unknown> | null,
-    ),
+    sourceMetadata,
     startedAt: run.startedAt,
     completedAt: run.completedAt,
+    processorLeaseExpiresAt: run.processorLeaseExpiresAt,
+    processorMode,
+    isStalled,
     createdAt: run.createdAt,
     updatedAt: run.updatedAt,
     ...progress,
     items: itemRows.map((item) => mapImportRunItem(item, investigationsById)),
   };
+}
+
+export async function listRecoverableCsvDirectImportRunIds(input?: {
+  importRunIds?: string[];
+  limit?: number;
+  stalledOnly?: boolean;
+}) {
+  const db = getDb();
+  const requestedIds = input?.importRunIds ?? [];
+  const rows = db.select().from(importRuns).all() as ImportRunRow[];
+  const terminalStatuses = new Set<ImportRunStatus>([
+    "completed",
+    "completed_with_errors",
+    "failed",
+    "cancelled",
+  ]);
+  const requestedIdSet = requestedIds.length > 0 ? new Set(requestedIds) : null;
+  const filtered = rows.filter((row) => {
+    if (row.sourceType !== "csv_direct_import") {
+      return false;
+    }
+
+    if (terminalStatuses.has(row.status as ImportRunStatus)) {
+      return false;
+    }
+
+    if (requestedIdSet && !requestedIdSet.has(row.id)) {
+      return false;
+    }
+
+    return true;
+  });
+  const detailedRows = await Promise.all(
+    filtered.map(async (row) => {
+      const progress = await getImportRunProgress(row.id);
+      const isStalled =
+        row.status === "running" &&
+        row.sourceStage === "processing" &&
+        progress.queuedCount > 0 &&
+        progress.runningCount === 0 &&
+        !hasActiveProcessorLease(row, nowIso());
+
+      return {
+        id: row.id,
+        createdAt: row.createdAt,
+        isStalled,
+      };
+    }),
+  );
+  const maybeStalledRows = input?.stalledOnly
+    ? detailedRows.filter((row) => row.isStalled)
+    : detailedRows;
+
+  maybeStalledRows.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+
+  const requestedLimit =
+    typeof input?.limit === "number"
+      ? input.limit
+      : maybeStalledRows.length > 0
+        ? maybeStalledRows.length
+        : 1;
+  const limit = Math.max(1, requestedLimit);
+  return maybeStalledRows.slice(0, limit).map((row) => row.id);
 }
 
 export async function updateImportRunSourceState(input: {
@@ -952,11 +1060,12 @@ export async function getImportRuns(options: {
   pageSize: number;
   status?: ImportRunStatus;
   sourceType?: ImportRunSourceType;
+  stalledDirectCsvOnly?: boolean;
 }) {
   const db = getDb();
   const offset = (options.page - 1) * options.pageSize;
 
-  let query = db.select().from(importRuns);
+  const query = db.select().from(importRuns);
 
   // Note: For a real production app we'd add where clauses here using drizzle-orm eq/and
   // but for this SQLite implementation we'll handle basic filtering and sorting.
@@ -972,18 +1081,20 @@ export async function getImportRuns(options: {
     filtered = filtered.filter(r => r.sourceType === options.sourceType);
   }
 
-  // Sort by createdAt desc
-  filtered.sort((a, b) => {
-    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
-
-  const total = filtered.length;
-  const items = filtered.slice(offset, offset + options.pageSize);
-
-  // Convert to detailed view
   const detailedItems = await Promise.all(
-    items.map(async (run) => {
+    filtered.map(async (run) => {
       const progress = await getImportRunProgress(run.id);
+      const sourceMetadata = normalizeSourceMetadata(
+        (run.sourceMetadata ?? null) as Record<string, unknown> | null,
+      );
+      const processorMode = getImportRunProcessorMode(sourceMetadata);
+      const isStalled =
+        run.status === "running" &&
+        run.sourceStage === "processing" &&
+        progress.queuedCount > 0 &&
+        progress.runningCount === 0 &&
+        !hasActiveProcessorLease(run, nowIso());
+
       return {
         id: run.id,
         sourceType: run.sourceType as ImportRunSourceType,
@@ -999,20 +1110,32 @@ export async function getImportRuns(options: {
         exportJobId: run.exportJobId,
         exportRowCount: run.exportRowCount,
         exportDownloadStatus: run.exportDownloadStatus as ImportRunExportDownloadStatus | null,
-        sourceMetadata: normalizeSourceMetadata(
-          (run.sourceMetadata ?? null) as Record<string, unknown> | null,
-        ),
+        sourceMetadata,
         startedAt: run.startedAt,
         completedAt: run.completedAt,
+        processorLeaseExpiresAt: run.processorLeaseExpiresAt,
+        processorMode,
+        isStalled,
         createdAt: run.createdAt,
         updatedAt: run.updatedAt,
         ...progress,
       };
     })
   );
+  const maybeStalledItems = options.stalledDirectCsvOnly
+    ? detailedItems.filter((run) => run.sourceType === "csv_direct_import" && run.isStalled)
+    : detailedItems;
+
+  // Sort by createdAt desc
+  maybeStalledItems.sort((left, right) => {
+    return new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime();
+  });
+
+  const total = maybeStalledItems.length;
+  const items = maybeStalledItems.slice(offset, offset + options.pageSize);
 
   return {
-    items: detailedItems,
+    items,
     total,
     page: options.page,
     pageSize: options.pageSize,

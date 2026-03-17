@@ -317,6 +317,106 @@ describe("investigateBid", () => {
     expect(result.investigation?.fetchStatus).toBe("failed");
   });
 
+  it("uses an explicit Ringba budget profile when provided", async () => {
+    vi.mocked(claimInvestigationFetch).mockResolvedValue({
+      id: "investigation-1",
+      bidId: "bid-1",
+      fetchStatus: "pending",
+      enrichmentState: "fetching",
+      shouldFetch: true,
+      blockReason: null,
+      fetchedAt: null,
+      lastError: null,
+      fetchAttemptCount: 1,
+      leaseExpiresAt: "2026-03-09T00:03:00.000Z",
+    });
+    vi.mocked(fetchRingbaBidDetail).mockResolvedValue({
+      bidId: "bid-1",
+      requestUrl: "https://api.example.com",
+      fetchedAt: "2026-03-09T00:02:00.000Z",
+      httpStatusCode: 200,
+      ok: true,
+      rawBody: { bidId: "bid-1" },
+      responseHeaders: {},
+      transportError: null,
+      errorKind: "none",
+      latencyMs: 120,
+      attemptCount: 1,
+      retryAfterMs: null,
+    });
+    vi.mocked(normalizeRingbaBidDetail).mockReturnValue({
+      bidId: "bid-1",
+      bidDt: "2026-03-09T00:00:00.000Z",
+      campaignName: "Campaign",
+      campaignId: "campaign-1",
+      publisherName: "Publisher",
+      publisherId: "publisher-1",
+      targetName: "Target",
+      targetId: "target-1",
+      buyerName: "Buyer",
+      buyerId: "buyer-1",
+      bidAmount: 1.25,
+      winningBid: 1.25,
+      bidElapsedMs: 100,
+      isZeroBid: false,
+      reasonForReject: null,
+      httpStatusCode: 200,
+      errorMessage: null,
+      primaryFailureStage: "accepted",
+      primaryTargetName: null,
+      primaryTargetId: null,
+      primaryBuyerName: null,
+      primaryBuyerId: null,
+      primaryErrorCode: null,
+      primaryErrorMessage: null,
+      requestBody: {},
+      responseBody: {},
+      rawTraceJson: {},
+      relevantEvents: [],
+      targetAttempts: [],
+      outcome: "accepted",
+      outcomeReasonCategory: "accepted",
+      outcomeReasonCode: null,
+      outcomeReasonMessage: null,
+      classificationSource: "heuristic",
+      classificationConfidence: 0.99,
+      classificationWarnings: [],
+      parseStatus: "complete",
+      normalizationVersion: "test-v1",
+      schemaVariant: "test_fixture",
+      normalizationConfidence: 1,
+      normalizationWarnings: [],
+      missingCriticalFields: [],
+      missingOptionalFields: [],
+      unknownEventNames: [],
+      rawPathsUsed: {},
+      primaryErrorCodeSource: null,
+      primaryErrorCodeConfidence: null,
+      primaryErrorCodeRawMatch: null,
+    });
+    vi.mocked(diagnoseBid).mockReturnValue({
+      rootCause: "unknown_needs_review",
+      confidence: 0.99,
+      severity: "low",
+      ownerType: "unknown",
+      suggestedFix: "No failure remediation is needed for accepted bids.",
+      explanation: "The winning bid was accepted, so failure diagnostics were skipped.",
+      evidence: [],
+    });
+    vi.mocked(upsertInvestigation).mockResolvedValue(buildInvestigation());
+
+    await investigateBid("bid-1", {
+      importRunId: "run-1",
+      forceRefresh: false,
+      sourceType: "historical_ringba_backfill",
+      ringbaBudgetProfile: "direct_csv_bulk",
+    });
+
+    expect(fetchRingbaBidDetail).toHaveBeenCalledWith("bid-1", {
+      budgetProfile: "direct_csv_bulk",
+    });
+  });
+
   it("reclassifies a stored fetched investigation from persisted raw payloads", async () => {
     vi.mocked(getInvestigationByBidId).mockResolvedValue(
       buildInvestigation({

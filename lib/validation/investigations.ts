@@ -20,4 +20,9 @@ export const investigationsQuerySchema = z.object({
   rootCause: z.enum(ROOT_CAUSES).optional(),
   ownerType: z.enum(OWNER_TYPES).optional(),
   search: z.string().trim().min(1).optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+  publisherName: z.string().trim().min(1).optional(),
+  campaignName: z.string().trim().min(1).optional(),
+  outcome: z.string().trim().min(1).optional(),
 });

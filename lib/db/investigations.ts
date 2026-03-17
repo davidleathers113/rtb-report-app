@@ -890,36 +890,96 @@ function matchesSearch(row: BidInvestigationRow, search: string | undefined) {
   return values.some((value) => value?.toLowerCase().includes(sanitized));
 }
 
-async function listFilteredInvestigations(input: {
+export interface BidFilterOptions {
   rootCause?: string;
   ownerType?: string;
   search?: string;
-}) {
-  const db = getDb();
-  const rows = db.select().from(bidInvestigations).all() as BidInvestigationRow[];
-
-  return sortInvestigations(
-    rows.filter((row) => {
-      if (input.rootCause && row.rootCause !== input.rootCause) {
-        return false;
-      }
-
-      if (input.ownerType && row.ownerType !== input.ownerType) {
-        return false;
-      }
-
-      return matchesSearch(row, input.search);
-    }),
-  );
+  startDate?: string;
+  endDate?: string;
+  publisherName?: string;
+  campaignName?: string;
+  outcome?: string;
 }
 
-export async function getInvestigations(input: {
-  page: number;
-  pageSize: number;
-  rootCause?: string;
-  ownerType?: string;
-  search?: string;
-}): Promise<InvestigationsPageData> {
+async function listFilteredInvestigations(input: BidFilterOptions) {
+  const db = getDb();
+  const filters = [];
+
+  if (input.rootCause) {
+    filters.push(eq(bidInvestigations.rootCause, input.rootCause));
+  }
+
+  if (input.ownerType) {
+    filters.push(eq(bidInvestigations.ownerType, input.ownerType));
+  }
+
+  if (input.outcome) {
+    filters.push(eq(bidInvestigations.outcome, input.outcome));
+  }
+
+  if (input.publisherName) {
+    filters.push(eq(bidInvestigations.publisherName, input.publisherName));
+  }
+
+  if (input.campaignName) {
+    filters.push(eq(bidInvestigations.campaignName, input.campaignName));
+  }
+
+  if (input.startDate) {
+    filters.push(
+      or(
+        gte(bidInvestigations.bidDt, input.startDate),
+        and(isNull(bidInvestigations.bidDt), gte(bidInvestigations.importedAt, input.startDate)),
+      ),
+    );
+  }
+
+  if (input.endDate) {
+    filters.push(
+      or(
+        lte(bidInvestigations.bidDt, input.endDate),
+        and(isNull(bidInvestigations.bidDt), lte(bidInvestigations.importedAt, input.endDate)),
+      ),
+    );
+  }
+
+  if (input.search) {
+    const sanitized = sanitizeSearch(input.search);
+    const pattern = `%${sanitized}%`;
+    filters.push(
+      or(
+        sql`${bidInvestigations.bidId} LIKE ${pattern}`,
+        sql`${bidInvestigations.campaignName} LIKE ${pattern}`,
+        sql`${bidInvestigations.publisherName} LIKE ${pattern}`,
+        sql`${bidInvestigations.targetName} LIKE ${pattern}`,
+        sql`${bidInvestigations.primaryTargetName} LIKE ${pattern}`,
+        sql`${bidInvestigations.primaryBuyerName} LIKE ${pattern}`,
+        sql`${bidInvestigations.primaryErrorMessage} LIKE ${pattern}`,
+      ),
+    );
+  }
+
+  const whereClause = filters.length > 0 ? and(...filters) : undefined;
+
+  const rows = db
+    .select()
+    .from(bidInvestigations)
+    .where(whereClause)
+    .orderBy(
+      desc(sql`COALESCE(${bidInvestigations.bidDt}, ${bidInvestigations.importedAt})`),
+      desc(bidInvestigations.importedAt),
+    )
+    .all() as BidInvestigationRow[];
+
+  return rows;
+}
+
+export async function getInvestigations(
+  input: {
+    page: number;
+    pageSize: number;
+  } & BidFilterOptions,
+): Promise<InvestigationsPageData> {
   const from = (input.page - 1) * input.pageSize;
   const rows = await listFilteredInvestigations(input);
 
@@ -1006,6 +1066,7 @@ export async function listHistoricalBackfillCandidates(input: {
   campaignId?: string;
   publisherId?: string;
   sourceImportRunId?: string;
+  sourceImportRunIds?: string[];
 }) {
   const db = getDb();
   const now = nowIso();
@@ -1033,8 +1094,17 @@ export async function listHistoricalBackfillCandidates(input: {
     filters.push(eq(bidInvestigations.publisherId, input.publisherId));
   }
 
-  if (input.sourceImportRunId) {
-    filters.push(eq(bidInvestigations.sourceImportRunId, input.sourceImportRunId));
+  const sourceImportRunIds =
+    input.sourceImportRunIds && input.sourceImportRunIds.length > 0
+      ? input.sourceImportRunIds
+      : input.sourceImportRunId
+        ? [input.sourceImportRunId]
+        : [];
+
+  if (sourceImportRunIds.length === 1) {
+    filters.push(eq(bidInvestigations.sourceImportRunId, sourceImportRunIds[0]));
+  } else if (sourceImportRunIds.length > 1) {
+    filters.push(inArray(bidInvestigations.sourceImportRunId, sourceImportRunIds));
   }
 
   if (input.cursorBidDt && input.cursorBidId) {
@@ -1099,6 +1169,7 @@ export async function countHistoricalBackfillCandidates(input: {
   campaignId?: string;
   publisherId?: string;
   sourceImportRunId?: string;
+  sourceImportRunIds?: string[];
 }) {
   const db = getDb();
   const now = nowIso();
@@ -1126,8 +1197,17 @@ export async function countHistoricalBackfillCandidates(input: {
     filters.push(eq(bidInvestigations.publisherId, input.publisherId));
   }
 
-  if (input.sourceImportRunId) {
-    filters.push(eq(bidInvestigations.sourceImportRunId, input.sourceImportRunId));
+  const sourceImportRunIds =
+    input.sourceImportRunIds && input.sourceImportRunIds.length > 0
+      ? input.sourceImportRunIds
+      : input.sourceImportRunId
+        ? [input.sourceImportRunId]
+        : [];
+
+  if (sourceImportRunIds.length === 1) {
+    filters.push(eq(bidInvestigations.sourceImportRunId, sourceImportRunIds[0]));
+  } else if (sourceImportRunIds.length > 1) {
+    filters.push(inArray(bidInvestigations.sourceImportRunId, sourceImportRunIds));
   }
 
   const row = db
@@ -1141,8 +1221,8 @@ export async function countHistoricalBackfillCandidates(input: {
   return row?.count ?? 0;
 }
 
-export async function getDashboardStats(): Promise<DashboardStats> {
-  const rows = (await listFilteredInvestigations({})).slice(0, 1000);
+export async function getDashboardStats(input: BidFilterOptions = {}): Promise<DashboardStats> {
+  const rows = await listFilteredInvestigations(input);
   const rootCauseCounts = new Map<string, number>();
   const campaignCounts = new Map<string, number>();
   const publisherCounts = new Map<string, number>();
@@ -1154,11 +1234,14 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   let zeroBidCount = 0;
 
   for (const row of rows) {
-    incrementMetric(rootCauseCounts, row.rootCause);
     incrementMetric(campaignCounts, row.campaignName);
     incrementMetric(publisherCounts, row.publisherName);
     incrementMetric(targetCounts, row.targetName);
     incrementMetric(outcomeCounts, row.outcome);
+
+    if (row.outcome !== "accepted") {
+      incrementMetric(rootCauseCounts, row.rootCause);
+    }
 
     if (row.outcome === "accepted") {
       acceptedCount += 1;

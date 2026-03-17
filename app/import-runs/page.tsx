@@ -1,6 +1,7 @@
 export const runtime = "nodejs";
 
 import { ImportRunList } from "@/components/investigations/import-run-list";
+import { StalledDirectImportRunsCard } from "@/components/investigations/stalled-direct-import-runs-card";
 import { AppShell } from "@/components/layout/app-shell";
 import {
   Card,
@@ -12,10 +13,17 @@ import {
 import { getImportRuns } from "@/lib/db/import-runs";
 
 export default async function ImportRunsPage() {
+  const emptyResult = { items: [], total: 0, page: 1, pageSize: 50 };
   const result = await getImportRuns({
     page: 1,
     pageSize: 50,
-  }).catch(() => ({ items: [], total: 0 }));
+  }).catch(() => emptyResult);
+  const stalledDirectCsvRuns = await getImportRuns({
+    page: 1,
+    pageSize: 50,
+    sourceType: "csv_direct_import",
+    stalledDirectCsvOnly: true,
+  }).catch(() => emptyResult);
 
   return (
     <AppShell currentPath="/import-runs">
@@ -26,6 +34,8 @@ export default async function ImportRunsPage() {
             Review all bulk data ingestion attempts, track background processing for large files, and diagnose run-level failures.
           </p>
         </div>
+
+        <StalledDirectImportRunsCard initialRuns={stalledDirectCsvRuns.items} />
 
         <Card>
           <CardHeader>

@@ -2,14 +2,15 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 
-import { getInvestigations } from "@/lib/db/investigations";
+import { getDashboardStats } from "@/lib/db/investigations";
 import { investigationsQuerySchema } from "@/lib/validation/investigations";
+
 export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
+    
+    // We reuse the same schema but ignore page/pageSize
     const parsed = investigationsQuerySchema.parse({
-      page: searchParams.get("page") ?? undefined,
-      pageSize: searchParams.get("pageSize") ?? undefined,
       rootCause: searchParams.get("rootCause") ?? undefined,
       ownerType: searchParams.get("ownerType") ?? undefined,
       search: searchParams.get("search") ?? undefined,
@@ -20,7 +21,7 @@ export async function GET(request: Request) {
       outcome: searchParams.get("outcome") ?? undefined,
     });
 
-    const result = await getInvestigations(parsed);
+    const result = await getDashboardStats(parsed);
 
     return NextResponse.json(result);
   } catch (error) {
@@ -29,7 +30,7 @@ export async function GET(request: Request) {
         error:
           error instanceof Error
             ? error.message
-            : "Unable to list investigations.",
+            : "Unable to fetch dashboard stats.",
       },
       { status: 400 },
     );

@@ -10,6 +10,7 @@ import { diagnoseBid } from "@/lib/diagnostics/rules";
 import { fetchRingbaBidDetail, type RingbaFetchResult } from "@/lib/ringba/client";
 import { normalizeRingbaBidDetail } from "@/lib/ringba/normalize";
 import { isRecord } from "@/lib/utils/json";
+import type { RingbaBudgetProfileName } from "@/types/import-run";
 
 interface InvestigateBidOptions {
   importRunId: string | null;
@@ -17,6 +18,7 @@ interface InvestigateBidOptions {
   waitForPendingMs?: number;
   pollIntervalMs?: number;
   sourceType?: string;
+  ringbaBudgetProfile?: RingbaBudgetProfileName | null;
 }
 
 export interface InvestigationExecutionResult {
@@ -97,9 +99,8 @@ export async function investigateBid(
   try {
     const fetchResult = await fetchRingbaBidDetail(bidId, {
       budgetProfile:
-        options.sourceType === "historical_ringba_backfill"
-          ? "historical_backfill"
-          : "default",
+        options.ringbaBudgetProfile ??
+        (options.sourceType === "historical_ringba_backfill" ? "historical_backfill" : "default"),
     });
     const nextRingbaRetryAt =
       fetchResult.retryAfterMs !== null

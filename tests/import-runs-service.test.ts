@@ -11,6 +11,7 @@ vi.mock("@/lib/db/import-runs", () => ({
   getImportRunBidIds: vi.fn(),
   getImportRunDetail: vi.fn(),
   getImportSourceCheckpoint: vi.fn(),
+  listRecoverableCsvDirectImportRunIds: vi.fn(),
   markImportRunFailed: vi.fn(),
   resetFailedImportRunItems: vi.fn(),
   updateImportRunSourceState: vi.fn(),
@@ -19,6 +20,14 @@ vi.mock("@/lib/db/import-runs", () => ({
 
 vi.mock("@/lib/investigations/service", () => ({
   investigateBid: vi.fn(),
+}));
+
+vi.mock("@/lib/import-runs/csv-direct", () => ({
+  processCsvDirectImportItem: vi.fn(),
+}));
+
+vi.mock("@/lib/import-runs/historical-backfill", () => ({
+  createHistoricalRingbaBackfillRun: vi.fn(),
 }));
 
 vi.mock("@/lib/db/import-ops-events", () => ({
@@ -33,15 +42,19 @@ import {
   finalizeImportRun,
   getImportRunBidIds,
   getImportRunDetail,
+  listRecoverableCsvDirectImportRunIds,
   resetFailedImportRunItems,
   updateImportRunSourceState,
 } from "@/lib/db/import-runs";
 import {
   createAsyncImportRun,
   processImportRun,
+  recoverCsvDirectImportRuns,
   rerunImportRun,
   retryFailedImportRunItems,
 } from "@/lib/import-runs/service";
+import { processCsvDirectImportItem } from "@/lib/import-runs/csv-direct";
+import { createHistoricalRingbaBackfillRun } from "@/lib/import-runs/historical-backfill";
 import { investigateBid } from "@/lib/investigations/service";
 import type { ImportRunDetail } from "@/types/import-run";
 
@@ -64,6 +77,9 @@ function buildRun(overrides: Partial<ImportRunDetail> = {}): ImportRunDetail {
     sourceMetadata: {},
     startedAt: "2026-03-09T00:00:00.000Z",
     completedAt: null,
+    processorLeaseExpiresAt: null,
+    processorMode: null,
+    isStalled: false,
     createdAt: "2026-03-09T00:00:00.000Z",
     updatedAt: "2026-03-09T00:00:00.000Z",
     totalItems: 1,
@@ -243,6 +259,75 @@ describe("import runs service", () => {
           totalFetchLatencyMs: 120,
         }),
       },
+    });
+  });
+
+  it("passes the throttle profile stored on historical backfill runs", async () => {
+    vi.mocked(claimImportRunProcessing).mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+      shouldProcess: true,
+      forceRefresh: false,
+      totalItems: 1,
+      totalProcessed: 0,
+      lastError: null,
+    });
+    vi.mocked(claimImportRunItems).mockResolvedValue([
+      { id: "item-1", bidId: "bid-1", position: 1 },
+    ]);
+    vi.mocked(getImportRunDetail).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          throttleProfileName: "direct_csv_bulk",
+          metrics: buildHistoricalMetrics(),
+        },
+      }),
+    );
+    vi.mocked(investigateBid).mockResolvedValue({
+      resolution: "reused",
+      fetchTelemetry: null,
+      investigation: {
+        id: "investigation-1",
+        bidId: "bid-1",
+        fetchStatus: "fetched",
+        enrichmentState: "enriched",
+        rawTraceJson: {},
+      },
+    } as unknown as Awaited<ReturnType<typeof investigateBid>>);
+    vi.mocked(updateImportRunSourceState).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          throttleProfileName: "direct_csv_bulk",
+          metrics: buildHistoricalMetrics({
+            attemptedCount: 1,
+            reusedCount: 1,
+          }),
+        },
+      }),
+    );
+    vi.mocked(finalizeImportRun).mockResolvedValue(
+      buildRun({
+        sourceType: "historical_ringba_backfill",
+        status: "completed",
+        queuedCount: 0,
+        completedCount: 1,
+        reusedCount: 1,
+      }),
+    );
+
+    await processImportRun({
+      importRunId: "run-1",
+      batchSize: 10,
+      maxBatches: 1,
+    });
+
+    expect(investigateBid).toHaveBeenCalledWith("bid-1", {
+      importRunId: "run-1",
+      forceRefresh: false,
+      sourceType: "historical_ringba_backfill",
+      ringbaBudgetProfile: "direct_csv_bulk",
     });
   });
 
@@ -438,6 +523,102 @@ describe("import runs service", () => {
       forceRefresh: true,
       sourceType: "import_run_rerun",
       notes: "Rerun of import run run-1.",
+    });
+  });
+
+  it("recovers direct CSV runs sequentially and creates filtered backfills", async () => {
+    vi.mocked(listRecoverableCsvDirectImportRunIds).mockResolvedValue(["run-1", "run-2"]);
+    vi.mocked(claimImportRunProcessing).mockResolvedValue({
+      id: "run-1",
+      status: "queued",
+      shouldProcess: true,
+      forceRefresh: false,
+      totalItems: 1,
+      totalProcessed: 0,
+      lastError: null,
+    });
+    vi.mocked(claimImportRunItems).mockResolvedValue([
+      { id: "item-1", bidId: "bid-1", position: 1 },
+    ]);
+    vi.mocked(processCsvDirectImportItem).mockResolvedValue({
+      investigationId: "investigation-1",
+      resolution: "reused",
+    });
+    vi.mocked(getImportRunDetail).mockImplementation(async (importRunId: string) => {
+      return buildRun({
+        id: importRunId,
+        sourceType: "csv_direct_import",
+        sourceStage: "queued",
+        status: "queued",
+      });
+    });
+    vi.mocked(updateImportRunSourceState).mockImplementation(async (input) => {
+      return buildRun({
+        id: input.importRunId,
+        sourceType: "csv_direct_import",
+        sourceStage: "processing",
+        status: "running",
+        sourceMetadata: input.sourceMetadata ?? {},
+        processorMode: "background_recovery",
+      });
+    });
+    vi.mocked(finalizeImportRun).mockImplementation(async (importRunId: string) => {
+      return buildRun({
+        id: importRunId,
+        sourceType: "csv_direct_import",
+        sourceStage: "completed",
+        status: "completed",
+        queuedCount: 0,
+        completedCount: 1,
+        reusedCount: 1,
+        percentComplete: 100,
+      });
+    });
+    vi.mocked(createHistoricalRingbaBackfillRun).mockImplementation(async (input) => {
+      const sourceImportRunIds = input.sourceImportRunIds ?? [];
+      return buildRun({
+        id: `backfill-${sourceImportRunIds[0] ?? "unknown"}`,
+        sourceType: "historical_ringba_backfill",
+        sourceMetadata: {
+          selection: {
+            sourceImportRunIds,
+          },
+          throttleProfileName: "direct_csv_bulk",
+          metrics: buildHistoricalMetrics(),
+        },
+      });
+    });
+
+    const result = await recoverCsvDirectImportRuns({
+      stalledOnly: true,
+      maxRuns: 2,
+      createHistoricalBackfill: true,
+      historicalBackfillLimit: 25,
+      historicalBackfillSort: "oldest_first",
+    });
+
+    expect(listRecoverableCsvDirectImportRunIds).toHaveBeenCalledWith({
+      importRunIds: undefined,
+      limit: 2,
+      stalledOnly: true,
+    });
+
+    expect(result.recoveredRuns.map((run) => run.id)).toEqual(["run-1", "run-2"]);
+    expect(result.createdBackfillRuns.map((run) => run.id)).toEqual([
+      "backfill-run-1",
+      "backfill-run-2",
+    ]);
+    expect(createHistoricalRingbaBackfillRun).toHaveBeenNthCalledWith(1, {
+      limit: 25,
+      sort: "oldest_first",
+      sourceImportRunIds: ["run-1"],
+      forceRefresh: false,
+    });
+    expect(createHistoricalRingbaBackfillRun).toHaveBeenNthCalledWith(2, {
+      limit: 25,
+      sort: "oldest_first",
+      sourceImportRunIds: ["run-2"],
+      forceRefresh: false,
     });
   });
 });

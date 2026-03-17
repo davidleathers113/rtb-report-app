@@ -27,6 +27,8 @@ import type {
   HistoricalBackfillSourceMetadata,
   CsvPreviewResult,
   ImportRunDetail,
+  ImportRunProcessorMode,
+  RingbaBudgetProfileName,
   RingbaRecentImportDiagnostics,
 } from "@/types/import-run";
 import type { ImportSourceRowsResponse } from "@/types/import-source";
@@ -144,6 +146,41 @@ function formatContentFingerprint(value: unknown) {
     : "Not available";
 }
 
+function splitDelimitedValues(value: string) {
+  const results: string[] = [];
+  const seen = new Set<string>();
+  let current = "";
+
+  for (const character of value) {
+    const isDelimiter =
+      character === "," ||
+      character === "\n" ||
+      character === "\r" ||
+      character === "\t" ||
+      character === " ";
+
+    if (!isDelimiter) {
+      current += character;
+      continue;
+    }
+
+    const trimmed = current.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      results.push(trimmed);
+    }
+    current = "";
+  }
+
+  const trimmed = current.trim();
+  if (trimmed && !seen.has(trimmed)) {
+    seen.add(trimmed);
+    results.push(trimmed);
+  }
+
+  return results;
+}
+
 function getRingbaDiagnostics(sourceMetadata: Record<string, unknown>) {
   const diagnostics = sourceMetadata.diagnostics;
 
@@ -174,6 +211,56 @@ function getHistoricalBackfillMetrics(sourceMetadata: Record<string, unknown>) {
     averageFetchLatencyMs:
       typeof metrics.averageFetchLatencyMs === "number" ? metrics.averageFetchLatencyMs : null,
   };
+}
+
+function getHistoricalBackfillSourceRunIds(sourceMetadata: Record<string, unknown>) {
+  const selection =
+    (sourceMetadata as HistoricalBackfillSourceMetadata).selection &&
+    typeof (sourceMetadata as HistoricalBackfillSourceMetadata).selection === "object"
+      ? ((sourceMetadata as HistoricalBackfillSourceMetadata).selection as Record<string, unknown>)
+      : {};
+  const sourceImportRunIds = selection.sourceImportRunIds;
+
+  if (Array.isArray(sourceImportRunIds)) {
+    return sourceImportRunIds.filter((value): value is string => typeof value === "string");
+  }
+
+  const sourceImportRunId = selection.sourceImportRunId;
+  return typeof sourceImportRunId === "string" && sourceImportRunId
+    ? [sourceImportRunId]
+    : [];
+}
+
+function getHistoricalBackfillThrottleProfile(
+  sourceMetadata: Record<string, unknown>,
+): RingbaBudgetProfileName {
+  return sourceMetadata.throttleProfileName === "direct_csv_bulk"
+    ? "direct_csv_bulk"
+    : "historical_backfill";
+}
+
+function getProcessorModeLabel(mode: ImportRunProcessorMode | null) {
+  if (mode === "background_recovery") {
+    return "Background recovery";
+  }
+
+  if (mode === "manual_step") {
+    return "Browser step mode";
+  }
+
+  return "Not attached";
+}
+
+function getProcessorModeBadgeVariant(mode: ImportRunProcessorMode | null) {
+  if (mode === "background_recovery") {
+    return "success" as const;
+  }
+
+  if (mode === "manual_step") {
+    return "warning" as const;
+  }
+
+  return "info" as const;
 }
 
 function formatTimestamp(value: string | null) {
@@ -314,6 +401,8 @@ export function BulkInvestigationClient({
     "newest_first" | "oldest_first"
   >("newest_first");
   const [historicalPilotLabel, setHistoricalPilotLabel] = useState("");
+  const [historicalBackfillSourceRunIdsText, setHistoricalBackfillSourceRunIdsText] = useState("");
+  const [isRecoveringDirectCsvRun, setIsRecoveringDirectCsvRun] = useState(false);
   const [schedules, setSchedules] = useState<ImportScheduleDetail[]>(initialSchedules);
   const [isRefreshingSchedules, setIsRefreshingSchedules] = useState(false);
   const [isSubmittingSchedule, setIsSubmittingSchedule] = useState(false);
@@ -428,6 +517,15 @@ export function BulkInvestigationClient({
         serverErrorCount: 0,
         averageFetchLatencyMs: null,
       };
+  const historicalBackfillSourceRunIds = useMemo(() => {
+    return splitDelimitedValues(historicalBackfillSourceRunIdsText);
+  }, [historicalBackfillSourceRunIdsText]);
+  const activeHistoricalBackfillSourceRunIds = activeRun
+    ? getHistoricalBackfillSourceRunIds(activeRun.sourceMetadata)
+    : [];
+  const activeHistoricalBackfillThrottleProfile = activeRun
+    ? getHistoricalBackfillThrottleProfile(activeRun.sourceMetadata)
+    : "historical_backfill";
   const csvDirectMetadata = activeRun ? getCsvDirectMetadata(activeRun.sourceMetadata) : null;
   const currentSourceStageIndex = ringbaRecentImportStages.findIndex((stage) => {
     return stage === currentSourceStage;
@@ -917,6 +1015,10 @@ export function BulkInvestigationClient({
             : undefined,
           limit: historicalBackfillLimit,
           sort: historicalBackfillSort,
+          sourceImportRunIds:
+            historicalBackfillSourceRunIds.length > 0
+              ? historicalBackfillSourceRunIds
+              : undefined,
           forceRefresh,
           pilotLabel: historicalPilotLabel || undefined,
         }),
@@ -939,6 +1041,74 @@ export function BulkInvestigationClient({
       );
     } finally {
       setIsSubmittingHistoricalBackfill(false);
+    }
+  }
+
+  function handleUseActiveCsvRunForBackfill() {
+    if (!activeRun || activeRun.sourceType !== "csv_direct_import") {
+      return;
+    }
+
+    setHistoricalBackfillSourceRunIdsText(activeRun.id);
+  }
+
+  async function handleRecoverDirectCsvRun(createHistoricalBackfill: boolean) {
+    if (!activeRun || activeRun.sourceType !== "csv_direct_import") {
+      return;
+    }
+
+    setIsRecoveringDirectCsvRun(true);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch("/api/import-runs/csv-direct/recover", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          importRunIds: [activeRun.id],
+          createHistoricalBackfill,
+          historicalBackfillLimit,
+          historicalBackfillSort,
+        }),
+      });
+      const payload = (await response.json()) as
+        | {
+            recoveredRuns?: ImportRunDetail[];
+            createdBackfillRuns?: ImportRunDetail[];
+            error?: string;
+          }
+        | ApiErrorResponse;
+
+      if (!response.ok) {
+        throw new Error(getApiErrorMessage(payload as ApiErrorResponse, "Unable to recover CSV run."));
+      }
+
+      const recoveredRuns =
+        "recoveredRuns" in payload && Array.isArray(payload.recoveredRuns)
+          ? payload.recoveredRuns
+          : [];
+      const createdBackfillRuns =
+        "createdBackfillRuns" in payload && Array.isArray(payload.createdBackfillRuns)
+          ? payload.createdBackfillRuns
+          : [];
+      const nextActiveRun =
+        createdBackfillRuns[0] ?? recoveredRuns[0] ?? null;
+
+      if (nextActiveRun) {
+        setActiveRun(nextActiveRun);
+      }
+
+      if (createHistoricalBackfill) {
+        setHistoricalBackfillSourceRunIdsText(activeRun.id);
+      }
+    } catch (error) {
+      setErrorMessage(
+        error instanceof Error ? error.message : "Unexpected direct CSV recovery error.",
+      );
+    } finally {
+      setIsRecoveringDirectCsvRun(false);
     }
   }
 
@@ -1777,8 +1947,9 @@ export function BulkInvestigationClient({
                 Historical Ringba backfill pilot
               </p>
               <p className="text-sm text-slate-500">
-                Select already-imported CSV-only bids from SQLite, then trickle Ringba
-                detail fetches through the existing async import pipeline.
+                Select already-imported CSV-only bids from SQLite, optionally filter by
+                direct CSV source run, then trickle Ringba detail fetches through the
+                existing async import pipeline.
               </p>
             </div>
             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -1818,6 +1989,20 @@ export function BulkInvestigationClient({
                 onChange={(event) => setHistoricalPilotLabel(event.target.value)}
                 placeholder="Pilot label"
               />
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+              <Input
+                value={historicalBackfillSourceRunIdsText}
+                onChange={(event) => setHistoricalBackfillSourceRunIdsText(event.target.value)}
+                placeholder="Optional source import run IDs (comma, space, or newline separated)"
+              />
+              <Button
+                variant="outline"
+                onClick={handleUseActiveCsvRunForBackfill}
+                disabled={!isDirectCsvRun}
+              >
+                Use Active CSV Run
+              </Button>
             </div>
             <div className="mt-4 flex justify-end">
               <Button
@@ -2832,6 +3017,40 @@ export function BulkInvestigationClient({
                 </div>
                 <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                   <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Processor Mode</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <Badge variant={getProcessorModeBadgeVariant(activeRun.processorMode)}>
+                        {getProcessorModeLabel(activeRun.processorMode)}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Processor Lease</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {formatTimestamp(activeRun.processorLeaseExpiresAt)}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Recovery State</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {activeRun.isStalled ? "Stalled" : activeRun.processorMode ? "Attached" : "Idle"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Ringba Follow-up</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      Use a historical backfill run after CSV staging completes.
+                    </p>
+                  </div>
+                </div>
+                {activeRun.isStalled ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    This direct CSV run still has queued work but no active processor lease.
+                    Resume it with background recovery instead of relying on the active browser run.
+                  </div>
+                ) : null}
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg bg-white p-3 text-sm">
                     <p className="text-slate-500">Stored Rows</p>
                     <p className="mt-1 font-medium text-slate-900">
                       {csvDirectMetadata.storedRowCount}
@@ -2855,6 +3074,24 @@ export function BulkInvestigationClient({
                       {csvDirectMetadata.skippedDuplicateRowCount}
                     </p>
                   </div>
+                </div>
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => handleRecoverDirectCsvRun(false)}
+                    disabled={isRecoveringDirectCsvRun}
+                  >
+                    {isRecoveringDirectCsvRun ? "Recovering CSV Run..." : "Run Background Recovery"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => handleRecoverDirectCsvRun(true)}
+                    disabled={isRecoveringDirectCsvRun}
+                  >
+                    {isRecoveringDirectCsvRun
+                      ? "Preparing Ringba Backfill..."
+                      : "Recover + Create Ringba Backfill"}
+                  </Button>
                 </div>
               </div>
             ) : null}
@@ -2890,7 +3127,7 @@ export function BulkInvestigationClient({
                     );
                   })}
                 </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
                   <div className="rounded-lg bg-white p-3 text-sm">
                     <p className="text-slate-500">Window Start</p>
                     <p className="mt-1 font-medium text-slate-900">
@@ -3062,6 +3299,24 @@ export function BulkInvestigationClient({
                       {historicalBackfillMetrics.averageFetchLatencyMs === null
                         ? "Pending"
                         : `${historicalBackfillMetrics.averageFetchLatencyMs} ms`}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Throttle Profile</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {activeHistoricalBackfillThrottleProfile === "direct_csv_bulk"
+                        ? "Direct CSV bulk"
+                        : "Historical backfill"}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Source Run Filter</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {activeHistoricalBackfillSourceRunIds.length > 0
+                        ? `${activeHistoricalBackfillSourceRunIds.length} run${
+                            activeHistoricalBackfillSourceRunIds.length === 1 ? "" : "s"
+                          }`
+                        : "All eligible rows"}
                     </p>
                   </div>
                 </div>

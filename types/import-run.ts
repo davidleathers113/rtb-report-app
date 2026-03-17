@@ -53,6 +53,16 @@ export const IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES = [
   "failed",
 ] as const;
 
+export const IMPORT_RUN_PROCESSOR_MODES = [
+  "manual_step",
+  "background_recovery",
+] as const;
+
+export const RINGBA_BUDGET_PROFILES = [
+  "historical_backfill",
+  "direct_csv_bulk",
+] as const;
+
 export type ImportRunStatus = (typeof IMPORT_RUN_STATUSES)[number];
 export type ImportRunItemStatus = (typeof IMPORT_RUN_ITEM_STATUSES)[number];
 export type ImportRunItemResolution = (typeof IMPORT_RUN_ITEM_RESOLUTIONS)[number];
@@ -60,6 +70,8 @@ export type ImportRunSourceType = (typeof IMPORT_RUN_SOURCE_TYPES)[number];
 export type ImportRunSourceStage = (typeof IMPORT_RUN_SOURCE_STAGES)[number];
 export type ImportRunExportDownloadStatus =
   (typeof IMPORT_RUN_EXPORT_DOWNLOAD_STATUSES)[number];
+export type ImportRunProcessorMode = (typeof IMPORT_RUN_PROCESSOR_MODES)[number];
+export type RingbaBudgetProfileName = (typeof RINGBA_BUDGET_PROFILES)[number];
 
 export interface HistoricalBackfillMetrics extends Record<string, unknown> {
   attemptedCount: number;
@@ -93,9 +105,10 @@ export interface HistoricalBackfillSourceMetadata extends Record<string, unknown
     campaignId?: string | null;
     publisherId?: string | null;
     sourceImportRunId?: string | null;
+    sourceImportRunIds?: string[] | null;
   };
   pilotLabel?: string | null;
-  throttleProfileName?: string | null;
+  throttleProfileName?: RingbaBudgetProfileName | null;
   checkpointSourceKey?: string | null;
   checkpointCursor?: {
     bidDt?: string | null;
@@ -106,6 +119,12 @@ export interface HistoricalBackfillSourceMetadata extends Record<string, unknown
   remainingCandidateCount?: number;
   selectedCandidates?: HistoricalBackfillCandidateSummary[];
   metrics?: HistoricalBackfillMetrics;
+}
+
+export interface ImportRunProcessorMetadata extends Record<string, unknown> {
+  mode?: ImportRunProcessorMode | null;
+  lastHeartbeatAt?: string | null;
+  lastCompletedAt?: string | null;
 }
 
 export interface ImportRunItemSummary {
@@ -154,6 +173,9 @@ export interface ImportRunDetail extends ImportRunProgress {
   sourceMetadata: Record<string, unknown>;
   startedAt: string | null;
   completedAt: string | null;
+  processorLeaseExpiresAt: string | null;
+  processorMode: ImportRunProcessorMode | null;
+  isStalled: boolean;
   createdAt: string;
   updatedAt: string;
   items: ImportRunItemSummary[];

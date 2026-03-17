@@ -17,6 +17,7 @@ export async function POST(
       importRunId,
       batchSize: parsed.batchSize,
       maxBatches: parsed.maxBatches,
+      processorMode: "manual_step",
     });
 
     return NextResponse.json(detail);

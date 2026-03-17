@@ -19,8 +19,13 @@ import {
 
 import type { DashboardMetric, DashboardTimePoint } from "@/types/bid";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { toSentenceCase } from "@/lib/utils";
 
 const pieColors = ["#0ea5e9", "#f97316", "#10b981", "#8b5cf6", "#ef4444"];
+
+function formatMetricLabel(value: string) {
+  return toSentenceCase(value);
+}
 
 function ChartFrame({ children }: { children: (size: { width: number; height: number }) => ReactNode }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -93,9 +98,20 @@ export function DashboardCharts({
             {({ width, height }) => (
               <BarChart width={width} height={height} data={errorsByCategory}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} />
+                <XAxis
+                  dataKey="label"
+                  angle={-20}
+                  height={72}
+                  interval={0}
+                  textAnchor="end"
+                  tick={{ fontSize: 12 }}
+                  tickFormatter={formatMetricLabel}
+                />
                 <YAxis allowDecimals={false} />
-                <Tooltip />
+                <Tooltip
+                  formatter={(value) => [value, "Count"]}
+                  labelFormatter={(label) => formatMetricLabel(String(label))}
+                />
                 <Bar dataKey="value" fill="#0ea5e9" radius={[6, 6, 0, 0]} />
               </BarChart>
             )}

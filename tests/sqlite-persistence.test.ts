@@ -347,6 +347,91 @@ describe.sequential("sqlite persistence integration", () => {
     });
   });
 
+  it("excludes accepted bids from dashboard error-category metrics", async () => {
+    await setupTestDatabase();
+    const investigations = await import("@/lib/db/investigations");
+
+    await investigations.upsertInvestigation({
+      importRunId: null,
+      normalizedBid: buildNormalizedBid("accepted-bid-1"),
+      diagnosis: buildDiagnosis(),
+    });
+    await investigations.upsertInvestigation({
+      importRunId: null,
+      normalizedBid: {
+        ...buildNormalizedBid("accepted-bid-2"),
+        campaignName: "Accepted Campaign",
+      },
+      diagnosis: buildDiagnosis(),
+    });
+    await investigations.upsertInvestigation({
+      importRunId: null,
+      normalizedBid: {
+        ...buildNormalizedBid("rejected-bid-1"),
+        outcome: "rejected",
+        outcomeReasonCategory: "tag_filtered_final",
+        outcomeReasonCode: "1006",
+        outcomeReasonMessage: "Final capacity check (Code: 1006)",
+        primaryFailureStage: "target_rejected",
+        primaryErrorMessage: "Final capacity check (Code: 1006)",
+        winningBid: null,
+        bidAmount: null,
+      },
+      diagnosis: {
+        ...buildDiagnosis(),
+        rootCause: "no_eligible_targets",
+        ownerType: "ringba_config",
+      },
+    });
+    await investigations.upsertInvestigation({
+      importRunId: null,
+      normalizedBid: {
+        ...buildNormalizedBid("zero-bid-1"),
+        outcome: "zero_bid",
+        outcomeReasonCategory: "below_minimum_revenue",
+        outcomeReasonCode: "minimum_revenue",
+        outcomeReasonMessage: "Minimum Revenue",
+        primaryFailureStage: "zero_bid",
+        isZeroBid: true,
+        winningBid: 0,
+      },
+      diagnosis: {
+        ...buildDiagnosis(),
+        rootCause: "below_minimum_revenue",
+        ownerType: "ringba_config",
+      },
+    });
+
+    const stats = await investigations.getDashboardStats();
+
+    expect(stats.acceptedCount).toBe(2);
+    expect(stats.rejectedCount).toBe(1);
+    expect(stats.zeroBidCount).toBe(1);
+    expect(stats.bidsByOutcome).toEqual(
+      expect.arrayContaining([
+        { label: "accepted", value: 2 },
+        { label: "rejected", value: 1 },
+        { label: "zero_bid", value: 1 },
+      ]),
+    );
+    expect(stats.errorsByCategory).toHaveLength(2);
+    expect(stats.topRootCauses).toHaveLength(2);
+    expect(stats.errorsByCategory).toEqual(
+      expect.arrayContaining([
+        { label: "no_eligible_targets", value: 1 },
+        { label: "below_minimum_revenue", value: 1 },
+      ]),
+    );
+    expect(stats.topRootCauses).toEqual(
+      expect.arrayContaining([
+        { label: "no_eligible_targets", value: 1 },
+        { label: "below_minimum_revenue", value: 1 },
+      ]),
+    );
+    expect(stats.errorsByCategory.some((metric) => metric.label === "unknown_needs_review")).toBe(false);
+    expect(stats.topRootCauses.some((metric) => metric.label === "unknown_needs_review")).toBe(false);
+  });
+
   it("reclaims stale import run items instead of leaving them stuck running", async () => {
     await setupTestDatabase();
     const db = getDb();
@@ -429,6 +514,142 @@ describe.sequential("sqlite persistence integration", () => {
     expect(detail?.sourceStage).toBe("queued");
     expect(detail?.queuedCount).toBe(1);
     expect(detail?.lastError).toBeNull();
+  });
+
+  it("flags direct CSV runs as stalled when queued work has no active processor lease", async () => {
+    await setupTestDatabase();
+    const db = getDb();
+    const runs = await import("@/lib/db/import-runs");
+
+    const runId = await runs.createImportRun({
+      sourceType: "csv_direct_import",
+      bidIds: ["bid-1", "bid-2"],
+      forceRefresh: false,
+      sourceMetadata: {
+        processor: {
+          mode: "background_recovery",
+        },
+      },
+    });
+
+    await db
+      .update(importRuns)
+      .set({
+        status: "running",
+        sourceStage: "processing",
+        processorLeaseExpiresAt: null,
+      })
+      .where(eq(importRuns.id, runId))
+      .run();
+
+    await db
+      .update(importRunItems)
+      .set({
+        status: "completed",
+        completedAt: "2026-03-09T00:00:00.000Z",
+      })
+      .where(eq(importRunItems.bidId, "bid-1"))
+      .run();
+
+    const detail = await runs.getImportRunDetail(runId);
+
+    expect(detail?.processorMode).toBe("background_recovery");
+    expect(detail?.isStalled).toBe(true);
+    expect(detail?.queuedCount).toBe(1);
+    expect(detail?.runningCount).toBe(0);
+  });
+
+  it("filters the import-runs list to stalled direct CSV runs only", async () => {
+    await setupTestDatabase();
+    const db = getDb();
+    const runs = await import("@/lib/db/import-runs");
+
+    const stalledRunId = await runs.createImportRun({
+      sourceType: "csv_direct_import",
+      bidIds: ["bid-1", "bid-2"],
+      forceRefresh: false,
+      sourceMetadata: {
+        processor: {
+          mode: "background_recovery",
+        },
+      },
+    });
+    const activeRunId = await runs.createImportRun({
+      sourceType: "csv_direct_import",
+      bidIds: ["bid-3", "bid-4"],
+      forceRefresh: false,
+      sourceMetadata: {
+        processor: {
+          mode: "background_recovery",
+        },
+      },
+    });
+    await runs.createImportRun({
+      sourceType: "manual_bulk",
+      bidIds: ["bid-5"],
+      forceRefresh: false,
+    });
+
+    await db
+      .update(importRuns)
+      .set({
+        status: "running",
+        sourceStage: "processing",
+        processorLeaseExpiresAt: null,
+      })
+      .where(eq(importRuns.id, stalledRunId))
+      .run();
+    await db
+      .update(importRunItems)
+      .set({
+        status: "completed",
+        completedAt: "2026-03-09T00:00:00.000Z",
+      })
+      .where(eq(importRunItems.importRunId, stalledRunId))
+      .run();
+    await db
+      .update(importRunItems)
+      .set({
+        status: "queued",
+        completedAt: null,
+      })
+      .where(eq(importRunItems.bidId, "bid-2"))
+      .run();
+
+    await db
+      .update(importRuns)
+      .set({
+        status: "running",
+        sourceStage: "processing",
+        processorLeaseExpiresAt: "2099-03-09T00:00:00.000Z",
+      })
+      .where(eq(importRuns.id, activeRunId))
+      .run();
+    await db
+      .update(importRunItems)
+      .set({
+        status: "running",
+        leaseExpiresAt: "2099-03-09T00:00:00.000Z",
+      })
+      .where(eq(importRunItems.bidId, "bid-3"))
+      .run();
+
+    const result = await runs.getImportRuns({
+      page: 1,
+      pageSize: 10,
+      stalledDirectCsvOnly: true,
+    });
+    const recoverableIds = await runs.listRecoverableCsvDirectImportRunIds({
+      stalledOnly: true,
+      limit: 10,
+    });
+
+    expect(result.total).toBe(1);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe(stalledRunId);
+    expect(result.items[0]?.sourceType).toBe("csv_direct_import");
+    expect(result.items[0]?.isStalled).toBe(true);
+    expect(recoverableIds).toEqual([stalledRunId]);
   });
 
   it("claims due schedules while ignoring paused schedules and stale overlap blockers", async () => {
