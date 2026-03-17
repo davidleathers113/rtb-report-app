@@ -33,6 +33,7 @@ export const DETAIL_SOURCES = ["csv_direct", "ringba_api"] as const;
 export const OUTCOME_REASON_CATEGORIES = [
   "accepted",
   "buyer_returned_zero_bid",
+  "below_minimum_revenue",
   "missing_required_field",
   "missing_caller_id",
   "tag_filtered_initial",

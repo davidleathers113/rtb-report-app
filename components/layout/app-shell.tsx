@@ -12,6 +12,10 @@ const navigation = [
     href: "/investigations",
     label: "Investigate Bids",
   },
+  {
+    href: "/import-runs",
+    label: "Import History",
+  },
 ];
 
 export function AppShell({

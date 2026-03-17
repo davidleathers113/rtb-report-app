@@ -2,7 +2,6 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 
-import { MAX_CSV_BID_IDS } from "@/lib/import-runs/csv-constants";
 import { ImportRunItemsTable } from "@/components/investigations/import-run-items-table";
 import { InvestigationTable } from "@/components/investigations/investigation-table";
 import { Badge } from "@/components/ui/badge";
@@ -21,7 +20,10 @@ import { parseBidIds } from "@/lib/utils/bid-input";
 import { toSentenceCase } from "@/lib/utils";
 import type { InvestigationListItem } from "@/types/bid";
 import type {
+  ApiErrorResponse,
   CsvDirectPreviewResult,
+  CsvDirectImportResponse,
+  CsvDirectSourceMetadata,
   HistoricalBackfillSourceMetadata,
   CsvPreviewResult,
   ImportRunDetail,
@@ -95,6 +97,51 @@ function progressTone(percentComplete: number) {
 
 function getSourceStageLabel(sourceStage: string) {
   return ringbaRecentImportStageLabels[sourceStage] ?? sourceStage;
+}
+
+function getImportSourceTypeLabel(sourceType: string) {
+  if (sourceType === "csv_direct_import") {
+    return "CSV import";
+  }
+
+  if (sourceType === "csv_upload") {
+    return "Bid IDs only";
+  }
+
+  if (sourceType === "ringba_recent_import") {
+    return "Ringba recent";
+  }
+
+  if (sourceType === "historical_ringba_backfill") {
+    return "Historical backfill";
+  }
+
+  if (sourceType === "manual_bulk") {
+    return "Manual bulk";
+  }
+
+  return toSentenceCase(sourceType);
+}
+
+function getApiErrorMessage(payload: ApiErrorResponse, fallback: string) {
+  return payload.error || fallback;
+}
+
+function getCsvDirectMetadata(sourceMetadata: Record<string, unknown>) {
+  const parsedRowCount = sourceMetadata.parsedRowCount;
+  const contentHash = sourceMetadata.contentHash;
+
+  if (typeof parsedRowCount !== "number" || typeof contentHash !== "string") {
+    return null;
+  }
+
+  return sourceMetadata as CsvDirectSourceMetadata;
+}
+
+function formatContentFingerprint(value: unknown) {
+  return typeof value === "string" && value.length > 0
+    ? `${value.slice(0, 12)}...`
+    : "Not available";
 }
 
 function getRingbaDiagnostics(sourceMetadata: Record<string, unknown>) {
@@ -246,7 +293,8 @@ export function BulkInvestigationClient({
     null,
   );
   const [selectedCsvColumnKey, setSelectedCsvColumnKey] = useState<string>("");
-  const [isDirectCsvMode, setIsDirectCsvMode] = useState(false);
+  const [isDirectCsvMode, setIsDirectCsvMode] = useState(true);
+  const [allowDuplicateDirectImport, setAllowDuplicateDirectImport] = useState(false);
   const [isSourceRowsModalOpen, setIsSourceRowsModalOpen] = useState(false);
   const [sourceRows, setSourceRows] = useState<ImportSourceRowsResponse | null>(null);
   const [isLoadingSourceRows, setIsLoadingSourceRows] = useState(false);
@@ -363,6 +411,7 @@ export function BulkInvestigationClient({
   const activeRunId = activeRun?.id ?? null;
   const isRingbaRecentRun = activeRun?.sourceType === "ringba_recent_import";
   const isHistoricalBackfillRun = activeRun?.sourceType === "historical_ringba_backfill";
+  const isDirectCsvRun = activeRun?.sourceType === "csv_direct_import";
   const currentSourceStage = activeRun?.sourceStage ?? "queued";
   const ringbaDiagnostics = activeRun
     ? getRingbaDiagnostics(activeRun.sourceMetadata)
@@ -379,6 +428,7 @@ export function BulkInvestigationClient({
         serverErrorCount: 0,
         averageFetchLatencyMs: null,
       };
+  const csvDirectMetadata = activeRun ? getCsvDirectMetadata(activeRun.sourceMetadata) : null;
   const currentSourceStageIndex = ringbaRecentImportStages.findIndex((stage) => {
     return stage === currentSourceStage;
   });
@@ -595,13 +645,11 @@ export function BulkInvestigationClient({
         method: "POST",
         body: formData,
       });
-      const payload = (await response.json()) as
-        | CsvPreviewResult
-        | { error?: string };
+      const payload = (await response.json()) as CsvPreviewResult | ApiErrorResponse;
 
       if (!response.ok) {
-        const errorPayload = payload as { error?: string };
-        throw new Error(errorPayload.error ?? "Unable to preview CSV upload.");
+        const errorPayload = payload as ApiErrorResponse;
+        throw new Error(getApiErrorMessage(errorPayload, "Unable to preview CSV upload."));
       }
 
       const preview = payload as CsvPreviewResult;
@@ -630,18 +678,20 @@ export function BulkInvestigationClient({
         method: "POST",
         body: formData,
       });
-      const payload = (await response.json()) as
-        | CsvDirectPreviewResult
-        | { error?: string };
+      const payload = (await response.json()) as CsvDirectPreviewResult | ApiErrorResponse;
 
       if (!response.ok) {
-        const errorPayload = payload as { error?: string };
-        throw new Error(errorPayload.error ?? "Unable to preview direct CSV import.");
+        const errorPayload = payload as ApiErrorResponse;
+        throw new Error(
+          getApiErrorMessage(errorPayload, "Unable to preview direct CSV import."),
+        );
       }
 
       setDirectCsvPreview(payload as CsvDirectPreviewResult);
+      setAllowDuplicateDirectImport(false);
     } catch (error) {
       setDirectCsvPreview(null);
+      setAllowDuplicateDirectImport(false);
       setErrorMessage(
         error instanceof Error ? error.message : "Unexpected direct CSV preview error.",
       );
@@ -655,6 +705,7 @@ export function BulkInvestigationClient({
     setCsvPreview(null);
     setDirectCsvPreview(null);
     setSelectedCsvColumnKey("");
+    setAllowDuplicateDirectImport(false);
 
     if (!file) {
       return;
@@ -699,13 +750,13 @@ export function BulkInvestigationClient({
         method: "POST",
         body: formData,
       });
-      const payload = (await response.json()) as
-        | ImportRunDetail
-        | { error?: string };
+      const payload = (await response.json()) as ImportRunDetail | ApiErrorResponse;
 
       if (!response.ok) {
-        const errorPayload = payload as { error?: string };
-        throw new Error(errorPayload.error ?? "Unable to create import run from CSV.");
+        const errorPayload = payload as ApiErrorResponse;
+        throw new Error(
+          getApiErrorMessage(errorPayload, "Unable to create import run from CSV."),
+        );
       }
 
       setActiveRun(payload as ImportRunDetail);
@@ -724,6 +775,13 @@ export function BulkInvestigationClient({
       return;
     }
 
+    if (directCsvPreview?.duplicateImport && !allowDuplicateDirectImport) {
+      setErrorMessage(
+        "This CSV has already been imported. Select the duplicate override option to import it again.",
+      );
+      return;
+    }
+
     setIsSubmittingDirectCsv(true);
     setErrorMessage(null);
 
@@ -731,21 +789,22 @@ export function BulkInvestigationClient({
       const formData = new FormData();
       formData.append("file", csvFile);
       formData.append("forceRefresh", String(forceRefresh));
+      formData.append("allowDuplicate", String(allowDuplicateDirectImport));
 
       const response = await fetch("/api/import-runs/csv-direct", {
         method: "POST",
         body: formData,
       });
-      const payload = (await response.json()) as
-        | ImportRunDetail
-        | { error?: string };
+      const payload = (await response.json()) as CsvDirectImportResponse | ApiErrorResponse;
 
       if (!response.ok) {
-        const errorPayload = payload as { error?: string };
-        throw new Error(errorPayload.error ?? "Unable to create direct CSV import run.");
+        const errorPayload = payload as ApiErrorResponse;
+        throw new Error(
+          getApiErrorMessage(errorPayload, "Unable to create direct CSV import run."),
+        );
       }
 
-      setActiveRun(payload as ImportRunDetail);
+      setActiveRun((payload as CsvDirectImportResponse).importRun);
     } catch (error) {
       setErrorMessage(
         error instanceof Error ? error.message : "Unexpected direct CSV import error.",
@@ -1333,7 +1392,8 @@ export function BulkInvestigationClient({
                   setCsvPreview(null);
                   setDirectCsvPreview(null);
                   setSelectedCsvColumnKey("");
-                  setIsDirectCsvMode(false);
+                  setIsDirectCsvMode(true);
+                  setAllowDuplicateDirectImport(false);
                   setRecentWindowMinutes(15);
                   setHistoricalBackfillStart("");
                   setHistoricalBackfillEnd("");
@@ -1353,7 +1413,7 @@ export function BulkInvestigationClient({
                   void loadSourceRows(0);
                 }}
               >
-                Raw Source Rows
+                Stored Source Rows
               </Button>
               <Button onClick={handleSubmit} disabled={isSubmitting}>
                 {isSubmitting ? "Creating Import Run..." : "Create Import Run"}
@@ -1362,11 +1422,11 @@ export function BulkInvestigationClient({
           </div>
           <div className="rounded-lg border border-slate-200 p-4">
             <div className="space-y-2">
-              <p className="text-sm font-semibold text-slate-900">Or upload a CSV</p>
+              <p className="text-sm font-semibold text-slate-900">Import a CSV into SQLite</p>
               <p className="text-sm text-slate-500">
-                Supports standard quoted CSV files up to {MAX_CSV_BID_IDS} Bid IDs for
-                Ringba lookups. Direct imports use a larger file limit and store rows
-                into SQLite without external fetches.
+                Upload an RTB CSV, review the detected rows, then import the full file into
+                SQLite. Use <span className="font-medium text-slate-700">Bid IDs only</span>{" "}
+                when you only want to extract one column for Ringba lookups.
               </p>
             </div>
             <div className="mt-4 space-y-4">
@@ -1380,39 +1440,69 @@ export function BulkInvestigationClient({
                 className="block w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               />
 
-              <label className="flex items-center gap-2 text-sm text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={isDirectCsvMode}
-                  onChange={(event) => {
-                    const nextValue = event.target.checked;
-                    setIsDirectCsvMode(nextValue);
-                    setCsvPreview(null);
-                    setDirectCsvPreview(null);
-                    setSelectedCsvColumnKey("");
-                    if (csvFile) {
-                      void (nextValue ? previewDirectCsv(csvFile) : previewCsv(csvFile));
-                    }
-                  }}
-                  className="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
-                />
-                Direct CSV import (store rows into SQLite without Ringba fetches)
-              </label>
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-slate-900">Step 1: Choose import mode</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant={isDirectCsvMode ? "default" : "outline"}
+                    onClick={() => {
+                      if (isDirectCsvMode) {
+                        return;
+                      }
+                      setIsDirectCsvMode(true);
+                      setCsvPreview(null);
+                      setDirectCsvPreview(null);
+                      setSelectedCsvColumnKey("");
+                      setAllowDuplicateDirectImport(false);
+                      if (csvFile) {
+                        void previewDirectCsv(csvFile);
+                      }
+                    }}
+                  >
+                    Import Full CSV
+                  </Button>
+                  <Button
+                    variant={!isDirectCsvMode ? "default" : "outline"}
+                    onClick={() => {
+                      if (!isDirectCsvMode) {
+                        return;
+                      }
+                      setIsDirectCsvMode(false);
+                      setCsvPreview(null);
+                      setDirectCsvPreview(null);
+                      setSelectedCsvColumnKey("");
+                      setAllowDuplicateDirectImport(false);
+                      if (csvFile) {
+                        void previewCsv(csvFile);
+                      }
+                    }}
+                  >
+                    Bid IDs Only
+                  </Button>
+                </div>
+                <p className="text-sm text-slate-500">
+                  Full CSV import stores every row in SQLite and queues unique Bid IDs for
+                  investigation. Bid IDs only extracts a single column for Ringba fetches.
+                </p>
+              </div>
 
               {isPreviewingCsv ? (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-                  Previewing CSV...
+                  Previewing Bid IDs only import...
                 </div>
               ) : null}
 
               {isPreviewingDirectCsv ? (
                 <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
-                  Previewing direct CSV...
+                  Previewing full CSV import...
                 </div>
               ) : null}
 
               {!isDirectCsvMode && csvPreview ? (
                 <div className="space-y-4 rounded-lg bg-slate-50 p-4">
+                  <p className="text-sm font-medium text-slate-900">
+                    Step 2: Review Bid IDs only preview
+                  </p>
                   <div className="grid gap-3 md:grid-cols-4">
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">
@@ -1498,8 +1588,8 @@ export function BulkInvestigationClient({
                   <div className="flex justify-end">
                     <Button onClick={handleSubmitCsv} disabled={isSubmittingCsv}>
                       {isSubmittingCsv
-                        ? "Creating CSV Import Run..."
-                        : "Create Import Run From CSV"}
+                        ? "Creating Bid ID Import..."
+                        : "Create Bid ID Import"}
                     </Button>
                   </div>
                 </div>
@@ -1507,6 +1597,9 @@ export function BulkInvestigationClient({
 
               {isDirectCsvMode && directCsvPreview ? (
                 <div className="space-y-4 rounded-lg bg-slate-50 p-4">
+                  <p className="text-sm font-medium text-slate-900">
+                    Step 2: Review the full CSV import
+                  </p>
                   <div className="grid gap-3 md:grid-cols-4">
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">
@@ -1534,10 +1627,31 @@ export function BulkInvestigationClient({
                     </div>
                     <div>
                       <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Duplicates
+                        Skipped Duplicates
                       </p>
                       <p className="mt-1 text-lg font-semibold text-slate-900">
-                        {directCsvPreview.duplicateBidIdCount}
+                        {directCsvPreview.skippedDuplicateRowCount}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-lg bg-white p-3 text-sm">
+                      <p className="text-slate-500">Queued Bid IDs</p>
+                      <p className="mt-1 font-medium text-slate-900">
+                        {directCsvPreview.queuedItemCount}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-white p-3 text-sm">
+                      <p className="text-slate-500">Rejected Rows</p>
+                      <p className="mt-1 font-medium text-slate-900">
+                        {directCsvPreview.rejectedRowCount}
+                      </p>
+                    </div>
+                    <div className="rounded-lg bg-white p-3 text-sm">
+                      <p className="text-slate-500">Content Fingerprint</p>
+                      <p className="mt-1 truncate font-medium text-slate-900">
+                        {formatContentFingerprint(directCsvPreview.contentHash)}
                       </p>
                     </div>
                   </div>
@@ -1583,14 +1697,42 @@ export function BulkInvestigationClient({
                     </div>
                   ) : null}
 
+                  {directCsvPreview.duplicateImport ? (
+                    <div className="space-y-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                      <div>
+                        <p className="font-medium">This file was already imported.</p>
+                        <p className="mt-1">
+                          Previous run: {directCsvPreview.duplicateImport.importRunId} from{" "}
+                          {directCsvPreview.duplicateImport.createdAt} with{" "}
+                          {directCsvPreview.duplicateImport.rowCount} stored rows.
+                        </p>
+                      </div>
+                      <label className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={allowDuplicateDirectImport}
+                          onChange={(event) =>
+                            setAllowDuplicateDirectImport(event.target.checked)
+                          }
+                          className="h-4 w-4 rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+                        />
+                        Import this exact file again anyway
+                      </label>
+                    </div>
+                  ) : null}
+
                   <div className="flex justify-end">
                     <Button
                       onClick={handleSubmitDirectCsv}
-                      disabled={isSubmittingDirectCsv}
+                      disabled={
+                        isSubmittingDirectCsv ||
+                        (Boolean(directCsvPreview.duplicateImport) &&
+                          !allowDuplicateDirectImport)
+                      }
                     >
                       {isSubmittingDirectCsv
-                        ? "Creating Direct CSV Import..."
-                        : "Create Direct CSV Import"}
+                        ? "Importing CSV Into SQLite..."
+                        : "Step 3: Import CSV Into SQLite"}
                     </Button>
                   </div>
                 </div>
@@ -2442,7 +2584,7 @@ export function BulkInvestigationClient({
           <div className="w-full max-w-5xl rounded-lg bg-white shadow-lg">
             <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">Raw Source Rows</h2>
+                <h2 className="text-lg font-semibold text-slate-900">Stored Source Rows</h2>
                 <p className="text-sm text-slate-500">
                   Browse raw CSV rows by file, bid id, or bid date range.
                 </p>
@@ -2533,12 +2675,13 @@ export function BulkInvestigationClient({
                       <th className="px-3 py-2"></th>
                       <th className="px-3 py-2">File</th>
                       <th className="px-3 py-2">Row</th>
+                      <th className="px-3 py-2">Status</th>
                       <th className="px-3 py-2">Bid ID</th>
                       <th className="px-3 py-2">Bid Date</th>
                       <th className="px-3 py-2">Campaign</th>
                       <th className="px-3 py-2">Publisher</th>
                       <th className="px-3 py-2">Bid</th>
-                      <th className="px-3 py-2">Reason</th>
+                      <th className="px-3 py-2">Import Note</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -2558,16 +2701,31 @@ export function BulkInvestigationClient({
                             </td>
                             <td className="px-3 py-2">{row.fileName}</td>
                             <td className="px-3 py-2">{row.rowNumber}</td>
+                            <td className="px-3 py-2">
+                              <Badge
+                                variant={
+                                  row.ingestStatus === "queued"
+                                    ? "success"
+                                    : row.ingestStatus === "skipped_duplicate"
+                                      ? "warning"
+                                      : "destructive"
+                                }
+                              >
+                                {toSentenceCase(row.ingestStatus)}
+                              </Badge>
+                            </td>
                             <td className="px-3 py-2">{row.bidId ?? "-"}</td>
                             <td className="px-3 py-2">{row.bidDt ?? "-"}</td>
                             <td className="px-3 py-2">{row.campaignName ?? "-"}</td>
                             <td className="px-3 py-2">{row.publisherName ?? "-"}</td>
                             <td className="px-3 py-2">{row.bidAmount ?? "-"}</td>
-                            <td className="px-3 py-2">{row.reasonForReject ?? "-"}</td>
+                            <td className="px-3 py-2">
+                              {row.ingestErrorMessage ?? row.reasonForReject ?? "-"}
+                            </td>
                           </tr>
                           {isExpanded ? (
                             <tr className="border-b border-slate-100 bg-slate-50">
-                              <td colSpan={9} className="px-3 py-3">
+                              <td colSpan={10} className="px-3 py-3">
                                 <JsonView value={row.rowJson} />
                               </td>
                             </tr>
@@ -2577,7 +2735,7 @@ export function BulkInvestigationClient({
                     })}
                     {!isLoadingSourceRows && (sourceRows?.items ?? []).length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="px-3 py-4 text-center text-slate-500">
+                        <td colSpan={10} className="px-3 py-4 text-center text-slate-500">
                           No source rows found.
                         </td>
                       </tr>
@@ -2623,7 +2781,7 @@ export function BulkInvestigationClient({
           <CardHeader>
             <div className="flex flex-wrap items-center gap-2">
               <CardTitle>Import Run Progress</CardTitle>
-              <Badge variant="info">{activeRun.sourceType}</Badge>
+              <Badge variant="info">{getImportSourceTypeLabel(activeRun.sourceType)}</Badge>
             </div>
             <CardDescription>
               Import run `{activeRun.id}` is {activeRun.status}. {activeRun.completedCount}{" "}
@@ -2649,6 +2807,57 @@ export function BulkInvestigationClient({
                 />
               </div>
             </div>
+
+            {activeRun.totalItems > activeRun.items.length ? (
+              <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
+                Showing the first {activeRun.items.length} items for this run to keep the UI
+                responsive. Progress totals still reflect the full import.
+              </div>
+            ) : null}
+
+            {isDirectCsvRun && csvDirectMetadata ? (
+              <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      CSV import summary
+                    </h3>
+                    <p className="text-sm text-slate-500">
+                      Stored rows, queued investigations, and non-fatal row outcomes.
+                    </p>
+                  </div>
+                  {csvDirectMetadata.duplicateImport ? (
+                    <Badge variant="warning">Duplicate upload override</Badge>
+                  ) : null}
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Stored Rows</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {csvDirectMetadata.storedRowCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Queued Bid IDs</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {csvDirectMetadata.queuedItemCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Rejected Rows</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {csvDirectMetadata.rejectedRowCount}
+                    </p>
+                  </div>
+                  <div className="rounded-lg bg-white p-3 text-sm">
+                    <p className="text-slate-500">Skipped Duplicates</p>
+                    <p className="mt-1 font-medium text-slate-900">
+                      {csvDirectMetadata.skippedDuplicateRowCount}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            ) : null}
 
             {isRingbaRecentRun ? (
               <div className="space-y-3 rounded-lg border border-slate-200 bg-slate-50 p-4">

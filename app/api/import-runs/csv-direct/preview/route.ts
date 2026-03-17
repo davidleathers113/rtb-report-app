@@ -2,7 +2,10 @@ export const runtime = "nodejs";
 
 import { NextResponse } from "next/server";
 
-import { previewCsvDirectUpload } from "@/lib/import-runs/csv-direct";
+import {
+  isCsvDirectImportError,
+  previewCsvDirectUpload,
+} from "@/lib/import-runs/csv-direct";
 
 export async function POST(request: Request) {
   try {
@@ -10,21 +13,29 @@ export async function POST(request: Request) {
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
-      throw new Error("Upload a CSV file before previewing a direct import.");
+      return NextResponse.json(
+        {
+          error: "Upload a CSV file before previewing a direct import.",
+          code: "csv_direct_missing_file",
+        },
+        { status: 422 },
+      );
     }
 
     const preview = await previewCsvDirectUpload({ file });
 
     return NextResponse.json(preview);
   } catch (error) {
+    const payload = {
+      error:
+        error instanceof Error ? error.message : "Unable to preview direct CSV import.",
+      code: isCsvDirectImportError(error) ? error.code : undefined,
+      details: isCsvDirectImportError(error) ? error.details : undefined,
+    };
+
     return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unable to preview direct CSV import.",
-      },
-      { status: 400 },
+      payload,
+      { status: isCsvDirectImportError(error) ? error.status : 500 },
     );
   }
 }

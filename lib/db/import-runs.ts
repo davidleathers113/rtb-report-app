@@ -29,6 +29,8 @@ import type {
   ImportRunStatus,
 } from "@/types/import-run";
 
+export const DEFAULT_IMPORT_RUN_DETAIL_ITEM_LIMIT = 250;
+
 function dedupeBidIds(bidIds: string[]) {
   const values: string[] = [];
   const seen = new Set<string>();
@@ -155,16 +157,65 @@ async function getImportRunRow(importRunId: string) {
   return row ?? null;
 }
 
-async function getImportRunItemRows(importRunId: string) {
+async function getImportRunItemRows(importRunId: string, itemLimit?: number) {
   const db = getDb();
-  const rows = db
+  const query = db
     .select()
     .from(importRunItems)
-    .where(eq(importRunItems.importRunId, importRunId))
-    .all() as ImportRunItemRow[];
+    .where(eq(importRunItems.importRunId, importRunId));
+
+  const rows = (
+    typeof itemLimit === "number" && itemLimit > 0
+      ? query.limit(itemLimit).all()
+      : query.all()
+  ) as ImportRunItemRow[];
 
   rows.sort((left, right) => left.position - right.position);
   return rows;
+}
+
+async function getImportRunProgress(importRunId: string) {
+  const db = getDb();
+  const row = db
+    .select({
+      totalItems: sql<number>`count(*)`,
+      queuedCount: sql<number>`sum(case when ${importRunItems.status} = 'queued' then 1 else 0 end)`,
+      runningCount: sql<number>`sum(case when ${importRunItems.status} = 'running' then 1 else 0 end)`,
+      completedCount: sql<number>`sum(case when ${importRunItems.status} = 'completed' then 1 else 0 end)`,
+      reusedCount: sql<number>`sum(case when ${importRunItems.resolution} = 'reused' then 1 else 0 end)`,
+      fetchedCount: sql<number>`sum(case when ${importRunItems.resolution} = 'fetched' then 1 else 0 end)`,
+      failedCount: sql<number>`sum(case when ${importRunItems.status} = 'failed' or ${importRunItems.resolution} = 'failed' then 1 else 0 end)`,
+    })
+    .from(importRunItems)
+    .where(eq(importRunItems.importRunId, importRunId))
+    .get() as
+    | {
+        totalItems: number;
+        queuedCount: number | null;
+        runningCount: number | null;
+        completedCount: number | null;
+        reusedCount: number | null;
+        fetchedCount: number | null;
+        failedCount: number | null;
+      }
+    | undefined;
+
+  const totalItems = row?.totalItems ?? 0;
+  const completedCount = row?.completedCount ?? 0;
+  const failedCount = row?.failedCount ?? 0;
+  const processedItems = completedCount + failedCount;
+
+  return {
+    totalItems,
+    queuedCount: row?.queuedCount ?? 0,
+    runningCount: row?.runningCount ?? 0,
+    completedCount,
+    reusedCount: row?.reusedCount ?? 0,
+    fetchedCount: row?.fetchedCount ?? 0,
+    failedCount,
+    percentComplete:
+      totalItems === 0 ? 0 : Math.min(100, Math.round((processedItems / totalItems) * 100)),
+  };
 }
 
 function splitIntoChunks(values: string[], chunkSize: number) {
@@ -296,14 +347,22 @@ export async function createImportRun(input: {
   return runId;
 }
 
-export async function getImportRunDetail(importRunId: string): Promise<ImportRunDetail | null> {
+export async function getImportRunDetail(
+  importRunId: string,
+  options?: {
+    itemLimit?: number;
+  },
+): Promise<ImportRunDetail | null> {
   const run = await getImportRunRow(importRunId);
 
   if (!run) {
     return null;
   }
 
-  const itemRows = await getImportRunItemRows(importRunId);
+  const itemRows = await getImportRunItemRows(
+    importRunId,
+    options?.itemLimit ?? DEFAULT_IMPORT_RUN_DETAIL_ITEM_LIMIT,
+  );
   const investigationIds = itemRows
     .map((item) => item.investigationId)
     .filter((value): value is string => Boolean(value));
@@ -311,7 +370,7 @@ export async function getImportRunDetail(importRunId: string): Promise<ImportRun
   const investigationsById = new Map(
     investigations.map((investigation) => [investigation.id, investigation]),
   );
-  const progress = calculateProgress(itemRows);
+  const progress = await getImportRunProgress(importRunId);
 
   return {
     id: run.id,
@@ -886,4 +945,76 @@ export async function resetFailedImportRunItems(input: {
 export async function getImportRunBidIds(importRunId: string) {
   const items = await getImportRunItemRows(importRunId);
   return items.map((item) => item.bidId);
+}
+
+export async function getImportRuns(options: {
+  page: number;
+  pageSize: number;
+  status?: ImportRunStatus;
+  sourceType?: ImportRunSourceType;
+}) {
+  const db = getDb();
+  const offset = (options.page - 1) * options.pageSize;
+
+  let query = db.select().from(importRuns);
+
+  // Note: For a real production app we'd add where clauses here using drizzle-orm eq/and
+  // but for this SQLite implementation we'll handle basic filtering and sorting.
+  
+  const allRuns = query.all() as ImportRunRow[];
+  
+  // Apply filters in-memory for this SQLite implementation
+  let filtered = allRuns;
+  if (options.status) {
+    filtered = filtered.filter(r => r.status === options.status);
+  }
+  if (options.sourceType) {
+    filtered = filtered.filter(r => r.sourceType === options.sourceType);
+  }
+
+  // Sort by createdAt desc
+  filtered.sort((a, b) => {
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+  });
+
+  const total = filtered.length;
+  const items = filtered.slice(offset, offset + options.pageSize);
+
+  // Convert to detailed view
+  const detailedItems = await Promise.all(
+    items.map(async (run) => {
+      const progress = await getImportRunProgress(run.id);
+      return {
+        id: run.id,
+        sourceType: run.sourceType as ImportRunSourceType,
+        triggerType: run.triggerType as "manual" | "scheduled",
+        scheduleId: run.scheduleId,
+        sourceStage: run.sourceStage as ImportRunSourceStage,
+        status: run.status as ImportRunStatus,
+        forceRefresh: run.forceRefresh,
+        notes: run.notes,
+        lastError: run.lastError,
+        sourceWindowStart: run.sourceWindowStart,
+        sourceWindowEnd: run.sourceWindowEnd,
+        exportJobId: run.exportJobId,
+        exportRowCount: run.exportRowCount,
+        exportDownloadStatus: run.exportDownloadStatus as ImportRunExportDownloadStatus | null,
+        sourceMetadata: normalizeSourceMetadata(
+          (run.sourceMetadata ?? null) as Record<string, unknown> | null,
+        ),
+        startedAt: run.startedAt,
+        completedAt: run.completedAt,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+        ...progress,
+      };
+    })
+  );
+
+  return {
+    items: detailedItems,
+    total,
+    page: options.page,
+    pageSize: options.pageSize,
+  };
 }

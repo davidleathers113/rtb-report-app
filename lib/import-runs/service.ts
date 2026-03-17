@@ -33,6 +33,8 @@ import type {
   ImportRunDetail,
 } from "@/types/import-run";
 
+const IMPORT_RUN_DETAIL_ITEM_LIMIT = 250;
+
 function dedupeBidIds(bidIds: string[]) {
   const values: string[] = [];
   const seen = new Set<string>();
@@ -250,13 +252,15 @@ export async function createAsyncImportRun(input: {
     scheduleId: input.scheduleId,
   });
 
-  const detail = await getImportRunDetail(importRunId);
+  const limitedDetail = await getImportRunDetail(importRunId, {
+    itemLimit: IMPORT_RUN_DETAIL_ITEM_LIMIT,
+  });
 
-  if (!detail) {
+  if (!limitedDetail) {
     throw new Error(`Unable to load import run detail after creation: ${importRunId}`);
   }
 
-  return detail;
+  return limitedDetail;
 }
 
 export { createHistoricalRingbaBackfillRun };
@@ -271,7 +275,9 @@ export async function processImportRun(input: {
   });
 
   if (!claim.shouldProcess) {
-    const current = await getImportRunDetail(input.importRunId);
+    const current = await getImportRunDetail(input.importRunId, {
+      itemLimit: IMPORT_RUN_DETAIL_ITEM_LIMIT,
+    });
 
     if (!current) {
       throw new Error(`Import run not found: ${input.importRunId}`);
@@ -281,7 +287,9 @@ export async function processImportRun(input: {
   }
 
   try {
-    let current = await getImportRunDetail(input.importRunId);
+    let current = await getImportRunDetail(input.importRunId, {
+      itemLimit: IMPORT_RUN_DETAIL_ITEM_LIMIT,
+    });
 
     if (!current) {
       throw new Error(`Import run not found: ${input.importRunId}`);

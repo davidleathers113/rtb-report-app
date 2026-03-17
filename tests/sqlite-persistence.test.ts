@@ -255,11 +255,11 @@ describe.sequential("sqlite persistence integration", () => {
         winningBid: 0,
         isZeroBid: true,
         outcome: "zero_bid",
-        outcomeReasonCategory: "tag_filtered_final",
-        outcomeReasonCode: "1006",
-        outcomeReasonMessage: "Final capacity check (Code: 1006)",
-        classificationSource: "reason_for_reject_text",
-        classificationConfidence: 0.62,
+        outcomeReasonCategory: "below_minimum_revenue",
+        outcomeReasonCode: "minimum_revenue",
+        outcomeReasonMessage: "Minimum Revenue",
+        classificationSource: "primary_attempt_structured",
+        classificationConfidence: 0.97,
         classificationWarnings: [],
         parseStatus: "text_fallback",
         normalizationConfidence: 0.61,
@@ -309,14 +309,14 @@ describe.sequential("sqlite persistence integration", () => {
             routeWeight: 1,
             accepted: false,
             winning: false,
-            bidAmount: 0,
+            bidAmount: 2.88,
             minDurationSeconds: 90,
             rejectReason: "Final capacity check (Code: 1006)",
             errorCode: 1006,
             errorMessage: "Final capacity check (Code: 1006)",
             errors: [],
             requestBody: { CID: "16787878433" },
-            responseBody: { bidAmount: 0, rejectReason: "Final capacity check (Code: 1006)" },
+            responseBody: { bidAmount: 2.88, rejectReason: "Final capacity check (Code: 1006)" },
             summaryReason: "Minimum Revenue",
             rawEventJson: { name: "PingRAWResult" },
           },
@@ -335,8 +335,10 @@ describe.sequential("sqlite persistence integration", () => {
     expect(detail?.normalizationConfidence).toBe(0.61);
     expect(detail?.normalizationWarnings).toHaveLength(1);
     expect(detail?.primaryErrorCodeSource).toBe("rejectReason_text");
-    expect(detail?.outcomeReasonCategory).toBe("tag_filtered_final");
-    expect(detail?.classificationSource).toBe("reason_for_reject_text");
+    expect(detail?.outcomeReasonCategory).toBe("below_minimum_revenue");
+    expect(detail?.classificationSource).toBe("primary_attempt_structured");
+    expect(detail?.targetAttempts[0]?.summaryReason).toBe("Minimum Revenue");
+    expect(detail?.targetAttempts[0]?.bidAmount).toBe(2.88);
     expect(detail?.targetAttempts).toHaveLength(1);
     expect(detail?.sourceContext?.fileName).toBe("recent-export.csv");
     expect(detail?.sourceContext?.rowJson).toEqual({

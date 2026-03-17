@@ -216,16 +216,69 @@ export interface CsvPreviewResult {
   }>;
 }
 
+export interface ApiErrorResponse {
+  error: string;
+  code?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface CsvDirectHeaderMappingEntry {
+  columnIndex: number;
+  sourceHeader: string;
+  normalizedHeader: string;
+  storedKey: string;
+  mappedField: string | null;
+  duplicateIndex: number;
+}
+
+export interface CsvDirectDuplicateImportMatch {
+  importRunId: string;
+  sourceFileId: string;
+  fileName: string;
+  rowCount: number;
+  createdAt: string;
+  contentHash: string;
+}
+
+export interface CsvDirectImportSummary extends Record<string, unknown> {
+  fileName: string;
+  contentHash: string;
+  storedRowCount: number;
+  parsedRowCount: number;
+  queuedItemCount: number;
+  rejectedRowCount: number;
+  skippedDuplicateRowCount: number;
+  validBidIdCount: number;
+  duplicateBidIdCount: number;
+  missingBidIdCount: number;
+  invalidBidIdCount: number;
+  earliestBidDt: string | null;
+  latestBidDt: string | null;
+}
+
+export interface CsvDirectSourceMetadata extends CsvDirectImportSummary {
+  parsedHeaders: string[];
+  headerMapping: CsvDirectHeaderMappingEntry[];
+  duplicateImport: CsvDirectDuplicateImportMatch | null;
+  warnings: string[];
+  lastError?: string;
+}
+
 export interface CsvDirectPreviewResult {
   fileName: string;
+  contentHash: string;
   totalRows: number;
   validBidIdCount: number;
+  queuedItemCount: number;
+  rejectedRowCount: number;
+  skippedDuplicateRowCount: number;
   missingBidIdCount: number;
   duplicateBidIdCount: number;
   invalidBidIdCount: number;
   earliestBidDt: string | null;
   latestBidDt: string | null;
   headers: string[];
+  duplicateImport: CsvDirectDuplicateImportMatch | null;
   sampleRows: Array<{
     rowNumber: number;
     bidId: string | null;
@@ -240,4 +293,10 @@ export interface CsvDirectPreviewResult {
     value: string;
     message: string;
   }>;
+}
+
+export interface CsvDirectImportResponse {
+  preview: CsvDirectPreviewResult;
+  summary: CsvDirectImportSummary;
+  importRun: ImportRunDetail;
 }

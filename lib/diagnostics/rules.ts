@@ -193,6 +193,21 @@ function derivedClassificationRule(
           evidence,
         },
       };
+    case "below_minimum_revenue":
+      return {
+        matched: true,
+        result: {
+          rootCause: "below_minimum_revenue",
+          confidence: derivedConfidence,
+          severity: "medium",
+          ownerType: "ringba_config",
+          suggestedFix:
+            "Review the campaign's minimum revenue floor and compare it with the buyer bid amounts being returned.",
+          explanation:
+            "Structured Ringba attempt details show the buyer returned a bid, but Ring Tree minimum revenue rejected it before a payable outcome.",
+          evidence,
+        },
+      };
     case "tag_filtered_initial":
     case "tag_filtered_final":
     case "no_matching_buyer":
@@ -617,21 +632,33 @@ export function diagnoseBid(normalizedBid: NormalizedBidData): DiagnosisResult {
 
   const contextText = buildContextText(normalizedBid);
 
-  const rules = [
-    derivedClassificationRule(normalizedBid, evidence),
-    rateLimitedRule(normalizedBid, contextText, evidence),
-    missingCallerIdRule(normalizedBid, contextText, evidence),
-    missingZipRule(normalizedBid, contextText, evidence),
-    validationRule(normalizedBid, contextText, evidence),
-    zeroBidRule(normalizedBid, contextText, evidence),
-    minimumRevenueRule(normalizedBid, evidence),
-    timeoutRule(normalizedBid, contextText, evidence),
-    confirmationFailureRule(normalizedBid, contextText, evidence),
-    enrichmentRule(normalizedBid, contextText, evidence),
-    noEligibleTargetsRule(normalizedBid, contextText, evidence),
+  const ruleRunners = [
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      derivedClassificationRule(normalizedBid, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      rateLimitedRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      missingCallerIdRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      missingZipRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      validationRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      zeroBidRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) => minimumRevenueRule(normalizedBid, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      timeoutRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      confirmationFailureRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      enrichmentRule(normalizedBid, contextText, ruleEvidence),
+    (ruleEvidence: DiagnosisEvidence[]) =>
+      noEligibleTargetsRule(normalizedBid, contextText, ruleEvidence),
   ];
 
-  for (const rule of rules) {
+  for (const runRule of ruleRunners) {
+    const ruleEvidence: DiagnosisEvidence[] = [];
+    const rule = runRule(ruleEvidence);
     if (rule.matched && rule.result) {
       return rule.result;
     }

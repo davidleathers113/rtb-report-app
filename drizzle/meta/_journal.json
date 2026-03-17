@@ -43,6 +43,13 @@
       "when": 1773190000000,
       "tag": "0005_ringba_classification_correction",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1773800000000,
+      "tag": "0006_csv_direct_import_polish",
+      "breakpoints": true
     }
   ]
 }

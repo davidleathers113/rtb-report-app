@@ -14,6 +14,22 @@ import { createId, nowIso } from "@/lib/db/utils";
 
 const ROW_CHUNK_SIZE = 1000;
 
+type ImportSourceRowInsert = Omit<
+  ImportSourceRow,
+  | "id"
+  | "importSourceFileId"
+  | "importRunId"
+  | "createdAt"
+  | "updatedAt"
+  | "ingestStatus"
+  | "ingestErrorCode"
+  | "ingestErrorMessage"
+> & {
+  ingestStatus?: string;
+  ingestErrorCode?: string | null;
+  ingestErrorMessage?: string | null;
+};
+
 function splitIntoChunks<T>(values: T[], chunkSize: number) {
   const chunks: T[][] = [];
 
@@ -28,8 +44,10 @@ export async function createImportSourceFile(input: {
   importRunId: string;
   sourceType: string;
   fileName: string;
+  contentHash?: string | null;
   rowCount: number;
   headerJson: string[];
+  headerMappingJson?: unknown[];
   sourceMetadata?: Record<string, unknown>;
 }): Promise<ImportSourceFileRow> {
   const db = getDb();
@@ -42,8 +60,10 @@ export async function createImportSourceFile(input: {
       importRunId: input.importRunId,
       sourceType: input.sourceType,
       fileName: input.fileName,
+      contentHash: input.contentHash ?? null,
       rowCount: input.rowCount,
       headerJson: input.headerJson,
+      headerMappingJson: input.headerMappingJson ?? [],
       sourceMetadata: input.sourceMetadata ?? {},
       createdAt: now,
       updatedAt: now,
@@ -55,8 +75,10 @@ export async function createImportSourceFile(input: {
     importRunId: input.importRunId,
     sourceType: input.sourceType,
     fileName: input.fileName,
+    contentHash: input.contentHash ?? null,
     rowCount: input.rowCount,
     headerJson: input.headerJson,
+    headerMappingJson: input.headerMappingJson ?? [],
     sourceMetadata: input.sourceMetadata ?? {},
     createdAt: now,
     updatedAt: now,
@@ -65,8 +87,10 @@ export async function createImportSourceFile(input: {
 
 export async function updateImportSourceFile(input: {
   id: string;
+  contentHash?: string | null;
   rowCount: number;
   headerJson: string[];
+  headerMappingJson?: unknown[];
   sourceMetadata?: Record<string, unknown>;
 }) {
   const db = getDb();
@@ -74,8 +98,10 @@ export async function updateImportSourceFile(input: {
 
   db.update(importSourceFiles)
     .set({
+      contentHash: input.contentHash ?? null,
       rowCount: input.rowCount,
       headerJson: input.headerJson,
+      headerMappingJson: input.headerMappingJson ?? [],
       sourceMetadata: input.sourceMetadata ?? {},
       updatedAt: now,
     })
@@ -86,16 +112,7 @@ export async function updateImportSourceFile(input: {
 export async function insertImportSourceRows(input: {
   importRunId: string;
   importSourceFileId: string;
-  rows: Array<
-    Omit<
-      ImportSourceRow,
-      | "id"
-      | "importSourceFileId"
-      | "importRunId"
-      | "createdAt"
-      | "updatedAt"
-    >
-  >;
+  rows: ImportSourceRowInsert[];
 }) {
   if (input.rows.length === 0) {
     return;
@@ -131,6 +148,9 @@ export async function insertImportSourceRows(input: {
             winningBidCallAccepted: row.winningBidCallAccepted ?? null,
             winningBidCallRejected: row.winningBidCallRejected ?? null,
             bidElapsedMs: row.bidElapsedMs ?? null,
+            ingestStatus: row.ingestStatus ?? "queued",
+            ingestErrorCode: row.ingestErrorCode ?? null,
+            ingestErrorMessage: row.ingestErrorMessage ?? null,
             rowJson: row.rowJson ?? {},
             createdAt: now,
             updatedAt: now,
@@ -144,16 +164,7 @@ export async function insertImportSourceRows(input: {
 export async function insertImportSourceRowsWithRunItemsBatch(input: {
   importRunId: string;
   importSourceFileId: string;
-  rows: Array<
-    Omit<
-      ImportSourceRow,
-      | "id"
-      | "importSourceFileId"
-      | "importRunId"
-      | "createdAt"
-      | "updatedAt"
-    >
-  >;
+  rows: ImportSourceRowInsert[];
   bidIds: string[];
   startPosition: number;
 }) {
@@ -197,6 +208,9 @@ export async function insertImportSourceRowsWithRunItemsBatch(input: {
             winningBidCallAccepted: row.winningBidCallAccepted ?? null,
             winningBidCallRejected: row.winningBidCallRejected ?? null,
             bidElapsedMs: row.bidElapsedMs ?? null,
+            ingestStatus: row.ingestStatus ?? "queued",
+            ingestErrorCode: row.ingestErrorCode ?? null,
+            ingestErrorMessage: row.ingestErrorMessage ?? null,
             rowJson: row.rowJson ?? {},
             createdAt: now,
             updatedAt: now,
@@ -329,7 +343,46 @@ export interface ImportSourceRowListItem {
   publisherName: string | null;
   bidAmount: number | null;
   reasonForReject: string | null;
+  ingestStatus: string;
+  ingestErrorCode: string | null;
+  ingestErrorMessage: string | null;
   rowJson: Record<string, unknown>;
+}
+
+export interface ImportSourceFileDuplicateMatch {
+  id: string;
+  importRunId: string;
+  fileName: string;
+  rowCount: number;
+  contentHash: string;
+  createdAt: string;
+}
+
+export async function findLatestImportSourceFileByContentHash(input: {
+  sourceType: string;
+  contentHash: string;
+}): Promise<ImportSourceFileDuplicateMatch | null> {
+  const db = getDb();
+  const row = db
+    .select({
+      id: importSourceFiles.id,
+      importRunId: importSourceFiles.importRunId,
+      fileName: importSourceFiles.fileName,
+      rowCount: importSourceFiles.rowCount,
+      contentHash: importSourceFiles.contentHash,
+      createdAt: importSourceFiles.createdAt,
+    })
+    .from(importSourceFiles)
+    .where(
+      and(
+        eq(importSourceFiles.sourceType, input.sourceType),
+        eq(importSourceFiles.contentHash, input.contentHash),
+      ),
+    )
+    .orderBy(desc(importSourceFiles.createdAt))
+    .get() as ImportSourceFileDuplicateMatch | undefined;
+
+  return row ?? null;
 }
 
 export async function listImportSourceFiles(): Promise<ImportSourceFileSummary[]> {
@@ -402,6 +455,9 @@ export async function listImportSourceRows(input: {
       publisherName: importSourceRows.publisherName,
       bidAmount: importSourceRows.bidAmount,
       reasonForReject: importSourceRows.reasonForReject,
+      ingestStatus: importSourceRows.ingestStatus,
+      ingestErrorCode: importSourceRows.ingestErrorCode,
+      ingestErrorMessage: importSourceRows.ingestErrorMessage,
       rowJson: importSourceRows.rowJson,
     })
     .from(importSourceRows)

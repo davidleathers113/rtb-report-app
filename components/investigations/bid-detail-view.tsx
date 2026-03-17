@@ -377,7 +377,7 @@ export function BidDetailView({
           <CardHeader>
             <CardTitle>Source Context</CardTitle>
             <CardDescription>
-              Values preserved from the imported Ringba source row for this bid.
+              Values preserved from the imported CSV source row for this bid.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-6 lg:grid-cols-2">

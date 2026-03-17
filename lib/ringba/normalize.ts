@@ -510,6 +510,7 @@ function deriveLegacyOutcome(
 
   if (
     outcomeReasonCategory === "buyer_returned_zero_bid" ||
+    outcomeReasonCategory === "below_minimum_revenue" ||
     outcomeReasonCategory === "tag_filtered_initial" ||
     outcomeReasonCategory === "tag_filtered_final" ||
     outcomeReasonCategory === "no_matching_buyer" ||
@@ -546,6 +547,34 @@ function buildClassificationConflictWarning(
       "Structured response details disagreed with the top-level reject reason, so the structured response was preferred.",
     field: "reasonForReject",
   };
+}
+
+function classifyMinimumRevenueDisposition(primaryAttempt: ParsedTargetAttempt | null) {
+  if (!primaryAttempt?.summaryReason) {
+    return null;
+  }
+
+  const summaryReason = primaryAttempt.summaryReason;
+  const summaryReasonLower = toLowerString(summaryReason);
+  if (!summaryReasonLower.includes("minimum revenue")) {
+    return null;
+  }
+
+  if ((primaryAttempt.bidAmount ?? 0) <= 0) {
+    return null;
+  }
+
+  if (primaryAttempt.winning === true || primaryAttempt.accepted === true) {
+    return null;
+  }
+
+  return buildDisposition({
+    outcomeReasonCategory: "below_minimum_revenue",
+    outcomeReasonCode: "minimum_revenue",
+    outcomeReasonMessage: summaryReason,
+    classificationSource: "primary_attempt_structured",
+    classificationConfidence: 0.97,
+  });
 }
 
 function classifyStructuredResponse(input: {
@@ -1465,6 +1494,11 @@ function classifyBidDisposition(input: {
   primaryErrorMessage: string | null;
   primaryErrorSource: string | null;
 }) {
+  const minimumRevenueClassification = classifyMinimumRevenueDisposition(input.primaryAttempt);
+  if (minimumRevenueClassification) {
+    return minimumRevenueClassification;
+  }
+
   if (
     (input.winningBid ?? 0) > 0 ||
     (input.bidAmount ?? 0) > 0 ||

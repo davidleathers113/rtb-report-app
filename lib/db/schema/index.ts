@@ -322,8 +322,10 @@ export const importSourceFiles = sqliteTable(
     }),
     sourceType: text("source_type").notNull(),
     fileName: text("file_name").notNull(),
+    contentHash: text("content_hash"),
     rowCount: integer("row_count").notNull().default(0),
     headerJson: text("header_json", { mode: "json" }).notNull().default(sql`'[]'`),
+    headerMappingJson: text("header_mapping_json", { mode: "json" }).notNull().default(sql`'[]'`),
     sourceMetadata: text("source_metadata", { mode: "json" }).notNull().default(sql`'{}'`),
     createdAt: text("created_at").notNull().default(nowIso),
     updatedAt: text("updated_at").notNull().default(nowIso),
@@ -331,6 +333,7 @@ export const importSourceFiles = sqliteTable(
   (table) => ({
     importRunIdx: index("import_source_files_import_run_id_idx").on(table.importRunId),
     sourceTypeIdx: index("import_source_files_source_type_idx").on(table.sourceType),
+    contentHashIdx: index("import_source_files_content_hash_idx").on(table.contentHash),
   }),
 );
 
@@ -365,6 +368,9 @@ export const importSourceRows = sqliteTable(
     winningBidCallAccepted: integer("winning_bid_call_accepted", { mode: "boolean" }),
     winningBidCallRejected: integer("winning_bid_call_rejected", { mode: "boolean" }),
     bidElapsedMs: integer("bid_elapsed_ms"),
+    ingestStatus: text("ingest_status").notNull().default("queued"),
+    ingestErrorCode: text("ingest_error_code"),
+    ingestErrorMessage: text("ingest_error_message"),
     rowJson: text("row_json", { mode: "json" }).notNull().default(sql`'{}'`),
     createdAt: text("created_at").notNull().default(nowIso),
     updatedAt: text("updated_at").notNull().default(nowIso),

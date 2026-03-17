@@ -461,6 +461,69 @@ function buildNoMatchingBuyerPayload() {
   };
 }
 
+function buildMinimumRevenuePayload() {
+  return {
+    report: {
+      partialResult: false,
+      totalCount: 1,
+      records: [
+        {
+          bidId: "RTB-minimum-revenue",
+          bidDt: 1773107707546,
+          campaignName: "Windows IB",
+          campaignId: "campaign-1",
+          publisherName: "Publisher",
+          publisherId: "publisher-1",
+          isZeroBid: true,
+          reasonForReject: "Final capacity check (Code: 1006)",
+          bidElapsedMs: 791,
+          events: [
+            {
+              name: "PingTreePingingSummary",
+              dtStamp: "2026-03-10T01:55:07.5463651Z",
+              eventStrVals: [
+                {
+                  name: "notAcceptedRingTreeTargets",
+                  value:
+                    "Oncore Windows - RTT[2.88,80,target-oncore] Minimum Revenue (Ring Tree Setting: $10.00) ",
+                },
+                { name: "acceptedRingTreeTargets", value: "" },
+              ],
+            },
+            {
+              name: "PingRAWResult",
+              dtStamp: "2026-03-10T01:55:07.5450083Z",
+              targetName: "Oncore Windows - RTT",
+              targetId: "target-oncore",
+              targetBuyer: "Oncore Leads",
+              targetBuyerId: "buyer-oncore",
+              eventVals: [
+                { name: "duration", value: 770 },
+                { name: "httpStatusCode", value: 200 },
+              ],
+              eventStrVals: [
+                { name: "url", value: "https://rtb.ringba.com/v1/production/oncore.json" },
+                { name: "method", value: "POST" },
+                {
+                  name: "requestBody",
+                  value: '{"CID":"15102347495","state":"CA","zipCode":"94530","exposeCallerId":"yes"}',
+                },
+                {
+                  name: "responseBody",
+                  value:
+                    '{"bidId":"RTB-positive-bid","bidAmount":2.88,"expireInSeconds":35,"bidTerms":[{"code":100,"callMinDuration":80}]}',
+                },
+                { name: "errorMessage", value: "" },
+                { name: "requestStatus", value: "Success" },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
 function buildZeroBidWithoutPingPayload() {
   return {
     report: {
@@ -687,6 +750,20 @@ describe("normalizeRingbaBidDetail", () => {
     expect(normalized.primaryErrorCodeSource).toBe("rejectReason_text");
     expect(normalized.outcomeReasonCategory).toBe("tag_filtered_final");
     expect(normalized.parseStatus).toBe("text_fallback");
+  });
+
+  it("prefers minimum revenue summaries over generic final capacity text when a target returned a bid", () => {
+    const normalized = normalizeRingbaBidDetail(
+      buildFetchResult(buildMinimumRevenuePayload(), "RTB-minimum-revenue"),
+    );
+
+    expect(normalized.outcome).toBe("zero_bid");
+    expect(normalized.outcomeReasonCategory).toBe("below_minimum_revenue");
+    expect(normalized.outcomeReasonCode).toBe("minimum_revenue");
+    expect(normalized.outcomeReasonMessage).toContain("Minimum Revenue");
+    expect(normalized.classificationSource).toBe("primary_attempt_structured");
+    expect(normalized.targetAttempts[0]?.bidAmount).toBe(2.88);
+    expect(normalized.targetAttempts[0]?.summaryReason).toContain("Minimum Revenue");
   });
 
   it("marks zero-bid payloads without PingRAWResult attempts as partial", () => {

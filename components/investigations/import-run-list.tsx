@@ -1,0 +1,98 @@
+"use client";
+
+import Link from "next/link";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { formatDateTime, toSentenceCase } from "@/lib/utils";
+import type { ImportRunDetail } from "@/types/import-run";
+
+function runStatusVariant(status: ImportRunDetail["status"]) {
+  if (status === "completed") return "success";
+  if (status === "completed_with_errors") return "warning";
+  if (status === "failed" || status === "cancelled") return "destructive";
+  if (status === "running") return "info";
+  return "default";
+}
+
+export function ImportRunList({ items }: { items: any[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Created At</TableHead>
+          <TableHead>Source</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Progress</TableHead>
+          <TableHead>Total</TableHead>
+          <TableHead>Completed</TableHead>
+          <TableHead>Failed</TableHead>
+          <TableHead>Notes</TableHead>
+          <TableHead>Action</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {items.length === 0 ? (
+          <TableRow>
+            <TableCell colSpan={9} className="text-center py-8 text-slate-500">
+              No import runs found.
+            </TableCell>
+          </TableRow>
+        ) : (
+          items.map((run) => (
+            <TableRow key={run.id}>
+              <TableCell className="whitespace-nowrap">
+                {formatDateTime(run.createdAt)}
+              </TableCell>
+              <TableCell>
+                <Badge variant="outline">{toSentenceCase(run.sourceType)}</Badge>
+              </TableCell>
+              <TableCell>
+                <Badge variant={runStatusVariant(run.status)}>
+                  {toSentenceCase(run.status)}
+                </Badge>
+              </TableCell>
+              <TableCell>
+                <div className="flex items-center gap-2">
+                  <div className="w-16 bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                    <div 
+                      className="bg-sky-600 h-full transition-all duration-500" 
+                      style={{ width: `${run.percentComplete}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-medium text-slate-600">
+                    {run.percentComplete}%
+                  </span>
+                </div>
+              </TableCell>
+              <TableCell>{run.totalItems}</TableCell>
+              <TableCell className="text-emerald-600 font-medium">
+                {run.completedCount}
+              </TableCell>
+              <TableCell className={run.failedCount > 0 ? "text-rose-600 font-medium" : "text-slate-400"}>
+                {run.failedCount}
+              </TableCell>
+              <TableCell className="max-w-[200px] truncate text-slate-500 italic">
+                {run.notes || "-"}
+              </TableCell>
+              <TableCell>
+                <Link
+                  href={`/import-runs/${run.id}`}
+                  className="text-sky-700 hover:text-sky-800 font-medium text-sm"
+                >
+                  View details
+                </Link>
+              </TableCell>
+            </TableRow>
+          ))
+        )}
+      </TableBody>
+    </Table>
+  );
+}

@@ -18,6 +18,9 @@ export interface ImportSourceRowListItem {
   publisherName: string | null;
   bidAmount: number | null;
   reasonForReject: string | null;
+  ingestStatus: string;
+  ingestErrorCode: string | null;
+  ingestErrorMessage: string | null;
   rowJson: Record<string, unknown>;
 }
 

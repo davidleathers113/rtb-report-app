@@ -122,6 +122,36 @@ describe("diagnoseBid", () => {
 
     expect(result.rootCause).toBe("no_eligible_targets");
     expect(result.ownerType).toBe("ringba_config");
+    expect(result.evidence.map((entry) => entry.field)).toEqual([
+      "outcomeReasonCategory",
+      "outcomeReasonCode",
+      "classificationSource",
+    ]);
+  });
+
+  it("maps derived minimum revenue classifications before generic fallback rules", () => {
+    process.env.MINIMUM_REVENUE_THRESHOLD = "10";
+
+    const result = diagnoseBid(
+      buildBid({
+        bidAmount: null,
+        winningBid: null,
+        outcome: "zero_bid",
+        outcomeReasonCategory: "below_minimum_revenue",
+        outcomeReasonCode: "minimum_revenue",
+        outcomeReasonMessage: "Minimum Revenue (Ring Tree Setting: $10.00)",
+        classificationSource: "primary_attempt_structured",
+        classificationConfidence: 0.97,
+      }),
+    );
+
+    expect(result.rootCause).toBe("below_minimum_revenue");
+    expect(result.ownerType).toBe("ringba_config");
+    expect(result.evidence.map((entry) => entry.field)).toEqual([
+      "outcomeReasonCategory",
+      "outcomeReasonCode",
+      "classificationSource",
+    ]);
   });
 
   it("keeps accepted bids neutral even when loser attempts contain failure text", () => {

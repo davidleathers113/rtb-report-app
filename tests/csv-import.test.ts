@@ -128,4 +128,35 @@ describe("CSV import parsing", () => {
     });
     expect(result.importRun.id).toBe("run-1");
   });
+
+  it("keeps the legacy CSV flow scoped to bid id extraction only", async () => {
+    vi.mocked(createAsyncImportRun).mockResolvedValue(buildRun());
+
+    const file = new File(
+      [
+        [
+          "Campaign,TraceId,Notes",
+          "Alpha,bid-1,first",
+          "Beta,bid-2,second",
+        ].join("\n"),
+      ],
+      "trace-export.csv",
+      {
+        type: "text/csv",
+      },
+    );
+
+    await createImportRunFromCsvUpload({
+      file,
+      selectedColumnKey: "column_1",
+      forceRefresh: false,
+    });
+
+    expect(createAsyncImportRun).toHaveBeenLastCalledWith({
+      bidIds: ["bid-1", "bid-2"],
+      forceRefresh: false,
+      sourceType: "csv_upload",
+      notes: "CSV upload import from trace-export.csv.",
+    });
+  });
 });
